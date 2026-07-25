@@ -155,6 +155,24 @@ bool backend_looks_uma(ggml_backend_t backend, ggml_backend_buffer* buffer)
 #define LOAD_METADATA(name) GGML_ASSERT(loader.get_metadata(prefix, #name, name))
 #define LOAD_METADATA_NOPREFIX(name) GGML_ASSERT(loader.get_metadata(#name, name))
 
+constexpr uint32_t GGML_TENSOR_FLAG_NEED_EPS_ADJUST = 28u << 0;
+
+static inline void set_tensor_eps(ggml_tensor* tensor, float eps)
+{
+    GGML_ASSERT(tensor && tensor->type == GGML_TYPE_F32);
+
+    tensor->flags |= GGML_TENSOR_FLAG_NEED_EPS_ADJUST;
+    *reinterpret_cast<float*>(tensor->op_params) = eps;
+}
+
+static inline float get_tensor_eps(const ggml_tensor* tensor)
+{
+    return (tensor->flags & GGML_TENSOR_FLAG_NEED_EPS_ADJUST)
+        ? *reinterpret_cast<const float*>(tensor->op_params)
+        : 0.0f;
+}
+
+
 void Module::OnLoad(const gguf_loader& loader, const std::string& prefix) {}
 
 void BasicModule::OnLoad(const gguf_loader& loader, const std::string& prefix)
@@ -293,10 +311,7 @@ void Snake::OnLoad(const gguf_loader& loader, const std::string& prefix)
 {
     LOAD_TENSOR(alpha);
 
-    constexpr float epsilon = 0.000000001f;
-    for (auto& i : std::span(reinterpret_cast<float*>(ggml_get_data(alpha)), ggml_nelements(alpha)))
-        if (std::abs(i) < epsilon)
-            i = epsilon;
+    set_tensor_eps(alpha, 1e-6f);
 }
 
 void ResBlock::OnLoad(const gguf_loader& loader, const std::string& prefix)
@@ -797,7 +812,28 @@ void cosyvoice_model_3::load(gguf_loader& loader)
         else
         {
             ggml_backend_tensor_alloc(shared->buffer.get(), new_tensor, buffer_base);
-            set_tensor(new_tensor, ggml_get_data(*tensor), tensor_size);
+
+            const auto eps = get_tensor_eps(*tensor);
+            if (eps == 0.f)
+                set_tensor(new_tensor, ggml_get_data(*tensor), tensor_size);
+            else
+            {
+                auto data = reinterpret_cast<const float*>(ggml_get_data(*tensor));
+                const auto nelements = ggml_nelements(*tensor);
+                std::unique_ptr<float[]> buffer;
+                for (int64_t i = 0; i != nelements; ++i)
+                    if (std::abs(data[i]) < eps)
+                    {
+                        if (!buffer)
+                        {
+                            buffer.reset(new float[nelements]);
+                            memcpy(buffer.get(), data, sizeof(float) * nelements);
+                        }
+
+                        buffer[i] = eps;
+                    }
+                set_tensor(new_tensor, buffer ? buffer.get() : data, tensor_size);
+            }
         }
 
         *tensor = new_tensor;
@@ -974,13 +1010,12 @@ void cosyvoice_model_3::load(gguf_loader& loader)
         default:
             throw std::invalid_argument("unexpected policy");
         }
-        cv3_worker->orig_max_seq_len = shared->params.n_max_seq;
     }
 
     auto arch = loader.get_string("general.architecture");
     shared->architecture.reset(new char[arch.size() + 1]);
     memcpy(shared->architecture.get(), arch.data(), arch.size() + 1);
-    cv3_shared->hift_overlap = hift.overlap_length();
+    shared->hift_overlap = hift.overlap_length();
 
     ggml_backend_synchronize(backend);
 }

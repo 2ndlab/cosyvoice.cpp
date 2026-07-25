@@ -265,37 +265,6 @@ void cosyvoice_model::empty_buffer_cache()
     worker->prompt_crc32 = 0;
 }
 
-void cosyvoice_model_3::empty_buffer_cache()
-{
-    cosyvoice_model::empty_buffer_cache();
-
-    if (cv3_worker->orig_max_seq_len != shared->params.n_max_seq)
-    {
-        shared->params.n_max_seq = cv3_worker->orig_max_seq_len;
-        worker->llm_kv_buffer.reset(
-            worker->llm_kv_cache.initialize_buffer(
-                worker->backend.get(),
-                static_cast<int>(cv3_shared->llm.layers[0].self_attn.k_proj.weight->ne[1] / cv3_shared->llm.num_key_value_heads),
-                static_cast<int>(cv3_shared->llm.layers[0].self_attn.v_proj.weight->ne[1] / cv3_shared->llm.num_key_value_heads),
-                shared->params.n_max_seq,
-                1));
-
-        switch (shared->params.inference_buffer_policy)
-        {
-        case COSYVOICE_INFERENCE_BUFFER_POLICY_BALANCED:
-        case COSYVOICE_INFERENCE_BUFFER_POLICY_SHARED:
-            cv3_worker->token2wav_buffer.release();
-            cv3_worker->token2wav_buffer.reset(worker->llm_kv_buffer.get());
-            break;
-        case COSYVOICE_INFERENCE_BUFFER_POLICY_DEDICATED:
-            cv3_worker->token2wav_buffer.reset();
-            break;
-        default:
-            GGML_ABORT("unexpected policy");
-        }
-    }
-}
-
 void cosyvoice_model_3::get_memory_usage(cosyvoice_memory_usage_t* usage)
 {
     usage->parameters = ggml_backend_buffer_get_size(shared->buffer.get());
@@ -331,7 +300,6 @@ void cosyvoice_model_3::reset_shared_buffer(ggml_backend_buffer* new_buffer)
     {
         worker->llm_kv_buffer.release();
         worker->llm_kv_buffer.reset(new_buffer);
-        shared->params.n_max_seq = worker->llm_kv_cache.reset_buffer(new_buffer);
     }
 }
 

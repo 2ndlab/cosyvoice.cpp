@@ -26,6 +26,7 @@ struct cosyvoice_model_shared
     cosyvoice_context_params_v3_cpp params;
     ggml_backend_op_capabilities op_caps;
     bool backend_uma;
+    int hift_overlap;
 
     std::mt19937 noise_rng;
     std::shared_mutex noise_mutex;
@@ -158,7 +159,6 @@ struct cosyvoice_model_3_shared
 
     std::set<int> stop_tokens;
     std::set<int> silent_tokens;
-    int hift_overlap;
 };
 
 struct cosyvoice_3_worker_context
@@ -168,8 +168,6 @@ struct cosyvoice_3_worker_context
 
     ggml_context_ptr ctx1;
     ggml_backend_buffer_ptr token2wav_buffer;
-
-    uint32_t orig_max_seq_len;
 };
 
 struct cosyvoice_model_3 : cosyvoice_model
@@ -200,7 +198,6 @@ struct cosyvoice_model_3 : cosyvoice_model
     bool token2wav(const int* token_ids, uint32_t n_tokens, float speed, cosyvoice_prompt_t prompt, cosyvoice_generated_speech_ptr result);
     bool token2wav_ext(const int* token_ids, uint32_t n_tokens, float speed, cosyvoice_prompt_t prompt, uint32_t* offset, bool streaming, bool finalize, cosyvoice_generated_speech_ptr result);
 
-    void empty_buffer_cache();
     void get_memory_usage(cosyvoice_memory_usage_t* usage);
     void get_total_memory_usage(cosyvoice_memory_usage_t* usage);
     void reset_shared_buffer(ggml_backend_buffer* new_buffer);

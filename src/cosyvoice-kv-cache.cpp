@@ -118,11 +118,10 @@ ggml_backend_buffer* cosyvoice_kv_cache::initialize_buffer(ggml_backend_t backen
     return ggml_backend_alloc_ctx_tensors(ctx, backend);
 }
 
-uint32_t cosyvoice_kv_cache::reset_buffer(ggml_backend_buffer* buffer)
+void cosyvoice_kv_cache::reset_buffer(ggml_backend_buffer* buffer)
 {
     cur_len = 0;
     auto alignment = ggml_backend_buffer_get_alignment(buffer);
-    auto max_seq_len = static_cast<uint32_t>(kv_cache_layers[0].k->ne[1]);
     auto k_ne = *reinterpret_cast<std::array<int64_t, GGML_MAX_DIMS>*>(&kv_cache_layers[0].k->ne);
     auto v_ne = *reinterpret_cast<std::array<int64_t, GGML_MAX_DIMS>*>(&kv_cache_layers[0].v->ne);
 
@@ -151,7 +150,6 @@ uint32_t cosyvoice_kv_cache::reset_buffer(ggml_backend_buffer* buffer)
         ggml_backend_tensor_alloc(buffer, v, buffer_base);
         buffer_base += get_aligned_size(ggml_backend_buffer_get_alloc_size(buffer, v), alignment);
     }
-    return max_seq_len;
 }
 
 void cosyvoice_kv_cache::offload_cache(ggml_backend_t backend, ggml_backend_sched* sched, uint32_t n_tokens)

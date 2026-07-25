@@ -638,7 +638,7 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
 
     if (!finalize)
     {
-        const auto overlap = static_cast<int64_t>(cv3_shared->hift_overlap);
+        const auto overlap = static_cast<int64_t>(shared->hift_overlap);
         const auto n_feat_frames = feat->ne[1];
         const auto frames_to_keep = std::min(overlap, n_feat_frames);
         const auto elements_to_keep = static_cast<size_t>(frames_to_keep * feat->ne[0]);
