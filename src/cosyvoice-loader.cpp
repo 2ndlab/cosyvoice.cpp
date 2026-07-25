@@ -934,7 +934,7 @@ void cosyvoice_model_3::load(gguf_loader& loader)
         workers[i].config = shared->config;
 
     auto [llm_k_type, llm_v_type] = cosyvoice_check_kv_cache_types(worker->ctx0.get(), worker->backend.get(),
-        shared->params.flow_use_flash_attn, cv3_shared->llm.num_attention_heads, cv3_shared->llm.num_key_value_heads,
+        shared->params.llm_use_flash_attn, cv3_shared->llm.num_attention_heads, cv3_shared->llm.num_key_value_heads,
         cv3_shared->llm.layers[0].self_attn.q_proj, cv3_shared->llm.layers[0].self_attn.k_proj, cv3_shared->llm.layers[0].self_attn.v_proj,
         shared->params.llm_allow_kv_cache_fallback, reinterpret_cast<kv_cache_type_union&>(shared->params.llm_kv_cache_type));
 
@@ -1018,14 +1018,4 @@ void cosyvoice_model_3::load(gguf_loader& loader)
     shared->hift_overlap = hift.overlap_length();
 
     ggml_backend_synchronize(backend);
-}
-
-bool cosyvoice_model_3::set_worker_no(uint32_t worker_no)
-{
-    if (worker_no >= shared->params.n_workers)
-        return false;
-
-    worker = workers + worker_no;
-    cv3_worker = cv3_workers + worker_no;
-    return true;
 }

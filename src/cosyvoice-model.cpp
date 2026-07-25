@@ -278,19 +278,24 @@ void cosyvoice_model_3::get_memory_usage(cosyvoice_memory_usage_t* usage)
 
 void cosyvoice_model_3::get_total_memory_usage(cosyvoice_memory_usage_t* usage)
 {
-    usage->parameters = ggml_backend_buffer_get_size(shared->buffer.get());
+    cosyvoice_memory_usage_t cur;
+    const auto worker_no = get_worker_no();
+
+    *usage = {};
     for (uint32_t i = 0; i != shared->params.n_workers; ++i)
     {
-        auto worker = workers + i;
-        auto cv3_worker = cv3_workers + i;
+        set_worker_no(i);
+        get_memory_usage(&cur);
 
-        usage->buffers = ggml_backend_sched_get_buffer_size(worker->sched.get(), worker->backend.get());
-        usage->cpu_buffers = ggml_backend_sched_get_buffer_size(worker->sched.get(), worker->cpu_backend.get());
-        usage->offloaded_kv_cache = worker->llm_kv_cache.get_offloaded_cache_size();
-        usage->random_noise = sizeof(float) * shared->rand_noise_len;
-        usage->kv_cache = worker->llm_kv_buffer.get() ? ggml_backend_buffer_get_size(worker->llm_kv_buffer.get()) : 0;
-        usage->token2wav = cv3_worker->token2wav_buffer.get() ? ggml_backend_buffer_get_size(cv3_worker->token2wav_buffer.get()) : 0;
+        usage->buffers += cur.buffers;
+        usage->cpu_buffers += cur.cpu_buffers;
+        usage->offloaded_kv_cache += cur.offloaded_kv_cache;
+        usage->random_noise += cur.random_noise;
+        usage->kv_cache += cur.kv_cache;
+        usage->token2wav += cur.token2wav;
     }
+    usage->parameters = cur.parameters;
+    set_worker_no(worker_no);
 }
 
 void cosyvoice_model_3::reset_shared_buffer(ggml_backend_buffer* new_buffer)
@@ -520,6 +525,16 @@ ggml_status cosyvoice_model::get_last_status()
 uint32_t cosyvoice_model::get_worker_no()
 {
     return static_cast<uint32_t>(worker - workers);
+}
+
+bool cosyvoice_model_3::set_worker_no(uint32_t worker_no)
+{
+    if (worker_no >= shared->params.n_workers)
+        return false;
+
+    worker = workers + worker_no;
+    cv3_worker = cv3_workers + worker_no;
+    return true;
 }
 
 uint32_t cosyvoice_model::get_n_workers()
