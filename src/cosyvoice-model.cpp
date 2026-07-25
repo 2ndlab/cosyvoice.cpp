@@ -66,7 +66,7 @@ cosyvoice_model_shared::cosyvoice_model_shared(const cosyvoice_context_params_v3
 cosyvoice_worker_context::cosyvoice_worker_context(ggml_backend_t backend)
     : backend(backend), cpu_backend(backend),
     ctx0(ggml_init(ggml_init_params{ .mem_size = ggml_graph_overhead() * kCosyVoiceGraphSize, .no_alloc = true })),
-    gf(nullptr), llm_input(nullptr), llm_probs(nullptr), position_ids(nullptr), causal_mask(nullptr), llm_kv_cache(),
+    gf(nullptr), llm_input(nullptr), llm_probs(nullptr), position_ids(nullptr), causal_mask(nullptr), llm_kv_cache(), dit_kv_cache(),
     status(GGML_STATUS_SUCCESS), prompt_crc32(0), sampler_seed(0), sampler(nullptr), sampler_ctx(nullptr), builtin_sampler_rng_policy(COSYVOICE_BUILTIN_SAMPLER_RNG_POLICY_RESET_PER_SESSION), nucleus_probs_capacity(0), nucleus_probs_len(0) {}
 
 cosyvoice_model::cosyvoice_model(ggml_backend_t backend, const cosyvoice_context_params_v3_cpp& params)

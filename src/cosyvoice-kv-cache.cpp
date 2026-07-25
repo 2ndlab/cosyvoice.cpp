@@ -301,6 +301,8 @@ void cosyvoice_kv_cache::load_slot(ggml_backend_t backend, ggml_backend_sched* s
 
 cosyvoice_kv_cache::~cosyvoice_kv_cache()
 {
+    if (!ctx) return;
+
     ggml_free(ctx);
     delete[] kv_cache_layers;
     auto object_size = get_offloaded_kv_cache_struct_size(layers);
