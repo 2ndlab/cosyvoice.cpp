@@ -434,9 +434,6 @@ bool cosyvoice_tts_stream(cosyvoice_context_t ctx, const int* text, uint32_t tex
                 return false;
 
         n_tokens = std::min(n_tokens + chunk_tokens, ctx->llm_get_n_accepted_tokens());
-        text = nullptr;
-        if (params.inference_buffer_policy == COSYVOICE_INFERENCE_BUFFER_POLICY_BALANCED)
-            ctx->llm_offload_kv_cache();
 
         cosyvoice_generated_speech result = {};
         if (!ctx->token2wav_ext(ctx->llm_get_accepted_tokens(), n_tokens, speed, prompt, &offset, true, ctx->llm_get_n_accepted_tokens() == n_tokens, &result))

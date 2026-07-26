@@ -32,8 +32,7 @@ bool cosyvoice_model_3::llm_job_ext(const int* text, uint32_t text_len, cosyvoic
     auto last_prompt_crc32 = prompt_crc32;
     bool stop_reached = false;
 
-    if (params.inference_buffer_policy == COSYVOICE_INFERENCE_BUFFER_POLICY_BALANCED
-        || params.inference_buffer_policy == COSYVOICE_INFERENCE_BUFFER_POLICY_SHARED && max_new_tokens != UINT32_MAX)
+    if (params.inference_buffer_policy == COSYVOICE_INFERENCE_BUFFER_POLICY_BALANCED)
     {
         ggml_backend_sched_reset(sched.get());
         worker->llm_kv_cache.load_cache(worker->backend.get(), sched.get());
@@ -49,97 +48,74 @@ bool cosyvoice_model_3::llm_job_ext(const int* text, uint32_t text_len, cosyvoic
         const char* cur;
         uint32_t offset = 0;
 
-        if (text != nullptr)
+        if (llm_get_n_accepted_tokens() == 0 || llm_get_kv_cache_len() == 0)
         {
-            if (speech_type == llm.embed_tokens_weight->type)
+            GGML_ASSERT(text);
+
+            const auto token_type = llm.embed_tokens_weight->type;
+            const auto token_row_size = static_cast<uint32_t>(llm.embed_tokens_weight->nb[1]);
+
+            auto prefill_embedding = [&](const char* data, int token_id, uint32_t row_size, ggml_type type)
             {
-                auto prefill_embedding = [&](const char* data, int token_id)
+                if (offset == n_batch)
                 {
-                    if (offset == n_batch)
-                    {
-                        if (!llm_prefill(speech_type, batch_buffer.get(), n_batch))
-                            throw std::runtime_error("Failed to prefill LLM KV cache.\n");
-                        offset = 0;
-                    }
-
-                    memcpy(batch_buffer.get() + offset++ * speech_row_size, data + token_id * speech_row_size, speech_row_size);
-                };
-
-                if (llm_get_kv_cache_len() == 0)
-                {
-                    prefill_embedding(speech_emb, llm.sos_token_id);
-                    prompt_crc32 = 0;
+                    if (!llm_prefill(type, batch_buffer.get(), n_batch))
+                        throw std::runtime_error("Failed to prefill LLM KV cache.\n");
+                    offset = 0;
                 }
-                // The first token is assumed to be the SOS token already stored in the KV cache.
-                if (prompt_crc32 != prompt->prompt_crc32)
-                {
-                    llm_set_kv_cache_len(1);
-                    for (const auto& i : prompt->prompt_text)
-                        prefill_embedding(token_emb, i);
-                    prompt_crc32 = prompt->prompt_crc32;
-                }
-                else llm_set_kv_cache_len(1 + static_cast<uint32_t>(prompt->prompt_text.size()));
 
-                for (uint32_t i = 0; i != text_len; ++i)
-                    prefill_embedding(token_emb, text[i]);
+                memcpy(batch_buffer.get() + offset++ * row_size, data + token_id * row_size, row_size);
+            };
 
-                if (prompt->llm_prompt_speech_tokens.second != 0)
-                {
-                    prefill_embedding(speech_emb, llm.task_token_id);
-
-                    const auto end = prompt->llm_prompt_speech_tokens.second - 1;
-                    for (uint32_t i = 0; i != end; ++i)
-                        prefill_embedding(speech_emb, prompt->llm_prompt_speech_tokens.first[i]);
-                    cur = speech_emb + prompt->llm_prompt_speech_tokens.first[end] * speech_row_size;
-                }
-                else cur = speech_emb + llm.task_token_id * speech_row_size;
-            }
-            else
+            if (llm_get_kv_cache_len() == 0)
             {
-                const auto token_type = llm.embed_tokens_weight->type;
-                const auto token_row_size = static_cast<uint32_t>(llm.embed_tokens_weight->nb[1]);
-
-                auto prefill_embedding = [&](const char* data, int token_id, uint32_t row_size, ggml_type type)
-                {
-                    if (offset == n_batch)
-                    {
-                        if (!llm_prefill(type, batch_buffer.get(), n_batch))
-                            throw std::runtime_error("Failed to prefill LLM KV cache.\n");
-                        offset = 0;
-                    }
-
-                    memcpy(batch_buffer.get() + offset++ * row_size, data + token_id * row_size, row_size);
-                };
-
-                if (llm_get_kv_cache_len() == 0)
+                if (speech_type == token_type)
+                    prefill_embedding(speech_emb, llm.sos_token_id, speech_row_size, speech_type);
+                else
                     llm_prefill(speech_type, speech_emb + llm.sos_token_id * speech_row_size, 1);
+            prefill_prompt:
+                for (const auto& i : prompt->prompt_text)
+                    prefill_embedding(token_emb, i, token_row_size, token_type);
+                prompt_crc32 = prompt->prompt_crc32;
+            }
+            else if (prompt_crc32 != prompt->prompt_crc32
+                || !llm_set_kv_cache_len(1 + static_cast<uint32_t>(prompt->prompt_text.size())))
+            {
                 // The first token is assumed to be the SOS token already stored in the KV cache.
-                if (prompt_crc32 != prompt->prompt_crc32)
-                {
-                    llm_set_kv_cache_len(1);
-                    for (const auto& i : prompt->prompt_text)
-                        prefill_embedding(token_emb, i, token_row_size, token_type);
-                    prompt_crc32 = prompt->prompt_crc32;
-                }
-                else llm_set_kv_cache_len(1 + static_cast<uint32_t>(prompt->prompt_text.size()));
+                llm_set_kv_cache_len(1);
+                goto prefill_prompt;
+            }
+                ;
 
-                for (uint32_t i = 0; i != text_len; ++i)
-                    prefill_embedding(token_emb, text[i], token_row_size, token_type);
+            for (uint32_t i = 0; i != text_len; ++i)
+                prefill_embedding(token_emb, text[i], token_row_size, token_type);
 
+            if (token_type != speech_type)
+            {
                 if (offset != 0 && !llm_prefill(token_type, batch_buffer.get(), offset))
                     throw std::runtime_error("Failed to prefill LLM KV cache.\n");
                 offset = 0;
+            }
 
-                if (prompt->llm_prompt_speech_tokens.second != 0)
-                {
-                    prefill_embedding(speech_emb, llm.task_token_id, speech_row_size, speech_type);
+            if (prompt->llm_prompt_speech_tokens.second != 0)
+            {
+                prefill_embedding(speech_emb, llm.task_token_id, speech_row_size, speech_type);
 
-                    const auto end = prompt->llm_prompt_speech_tokens.second - 1;
-                    for (uint32_t i = 0; i != end; ++i)
-                        prefill_embedding(speech_emb, prompt->llm_prompt_speech_tokens.first[i], speech_row_size, speech_type);
-                    cur = speech_emb + prompt->llm_prompt_speech_tokens.first[end] * speech_row_size;
-                }
-                else cur = speech_emb + llm.task_token_id * speech_row_size;
+                const auto end = prompt->llm_prompt_speech_tokens.second - 1;
+                for (uint32_t i = 0; i != end; ++i)
+                    prefill_embedding(speech_emb, prompt->llm_prompt_speech_tokens.first[i], speech_row_size, speech_type);
+                cur = speech_emb + prompt->llm_prompt_speech_tokens.first[end] * speech_row_size;
+            }
+            else cur = speech_emb + llm.task_token_id * speech_row_size;
+
+            if (const auto n_acc = llm_get_n_accepted_tokens(); n_acc > 0)
+            {
+                const auto* acc_tokens = llm_get_accepted_tokens();
+                const auto end = n_acc - 1;
+                prefill_embedding(cur, 0, speech_row_size, speech_type);
+                for (uint32_t i = 0; i < end; ++i)
+                    prefill_embedding(speech_emb, acc_tokens[i], speech_row_size, speech_type);
+                cur = speech_emb + acc_tokens[end] * speech_row_size;
             }
 
             if (offset != 0 && !llm_prefill(speech_type, batch_buffer.get(), offset))
@@ -148,10 +124,7 @@ bool cosyvoice_model_3::llm_job_ext(const int* text, uint32_t text_len, cosyvoic
         else
         {
             // Continue from existing KV cache — get last accepted token's embedding
-            const auto n_acc = llm_get_n_accepted_tokens();
-            if (n_acc == 0)
-                throw std::runtime_error("llm_job_ext: cannot continue generation with empty token history.\n");
-            const auto last_token_id = llm_get_accepted_tokens()[n_acc - 1];
+            const auto last_token_id = llm_get_accepted_tokens()[llm_get_n_accepted_tokens() - 1];
             cur = speech_emb + last_token_id * speech_row_size;
         }
 
@@ -216,6 +189,7 @@ bool cosyvoice_model_3::llm_job_ext(const int* text, uint32_t text_len, cosyvoic
     catch (const std::exception& e)
     {
         worker->llm_input = nullptr;
+        llm_set_kv_cache_len(0);
         cosyvoice_call_ggml_log_callback(GGML_LOG_LEVEL_ERROR, e.what());
         if (params.builtin_sampler_rng_policy == COSYVOICE_BUILTIN_SAMPLER_RNG_POLICY_RESET_PER_SESSION)
             reset_builtin_sampler_rng();
@@ -231,7 +205,7 @@ bool cosyvoice_model_3::llm_job_ext(const int* text, uint32_t text_len, cosyvoic
         llm_set_kv_cache_len(1 + static_cast<uint32_t>(prompt->prompt_text.size()));
         llm_offload_kv_cache();
     }
-    else if (params.inference_buffer_policy != COSYVOICE_INFERENCE_BUFFER_POLICY_DEDICATED && max_new_tokens != UINT32_MAX && !stop_reached)
+    else if (params.inference_buffer_policy == COSYVOICE_INFERENCE_BUFFER_POLICY_BALANCED && max_new_tokens != UINT32_MAX && !stop_reached)
         llm_offload_kv_cache();
 
     // Reset RNG on stop (matches non-streaming behavior)
@@ -529,7 +503,7 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
 
     worker->status = ggml_backend_sched_graph_compute(sched.get(), gf);
     shared->noise_callback(COSYVOICE_NOISE_CALLBACK_STAGE_AFTER_FLOW, noise_len, noise_buffer, shared->noise_callback_ctx);
-    if (params.inference_buffer_policy == COSYVOICE_INFERENCE_BUFFER_POLICY_SHARED)
+    if (params.inference_buffer_policy != COSYVOICE_INFERENCE_BUFFER_POLICY_DEDICATED)
         llm_set_kv_cache_len(0);
     if (worker->status != GGML_STATUS_SUCCESS)
         return false;

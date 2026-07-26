@@ -286,6 +286,7 @@ COSYVOICE_API bool cosyvoice_llm_job(
 * @brief Run the LLM with the given input tokens and prompt, with additional options.
  * @param max_new_tokens Maximum number of new tokens to generate. If 0, no new tokens are generated.
  * @param final Output parameter indicating whether the generation is complete (true) or more tokens can be generated (false).
+ * @note @p text must not be nullptr. Use @ref cosyvoice_llm_get_n_accepted_tokens to check whether this is a fresh run or a continuation.
  */
 COSYVOICE_API bool cosyvoice_llm_job_ext(
     cosyvoice_context_t ctx,

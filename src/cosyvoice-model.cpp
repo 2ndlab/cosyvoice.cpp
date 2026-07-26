@@ -305,6 +305,7 @@ void cosyvoice_model_3::reset_shared_buffer(ggml_backend_buffer* new_buffer)
     {
         worker->llm_kv_buffer.release();
         worker->llm_kv_buffer.reset(new_buffer);
+        worker->llm_kv_cache.reset_buffer(worker->llm_kv_buffer.get());
     }
 }
 
