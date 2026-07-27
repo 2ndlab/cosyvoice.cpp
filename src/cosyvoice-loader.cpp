@@ -61,7 +61,7 @@ bool backend_looks_uma(ggml_backend_t backend, ggml_backend_buffer* buffer)
 {
     ggml_backend_dev_props props;
     ggml_backend_dev_get_props(ggml_backend_get_device(backend), &props);
-    if (props.type == GGML_BACKEND_DEVICE_TYPE_IGPU)
+    if (props.type == GGML_BACKEND_DEVICE_TYPE_IGPU || props.type == GGML_BACKEND_DEVICE_TYPE_CPU)
         return true;
     if (strncmp(props.name, "Vulkan", 6) == 0 && props.type == GGML_BACKEND_DEVICE_TYPE_GPU)
         return false;
@@ -542,10 +542,19 @@ static std::tuple<ggml_type, ggml_type> cosyvoice_check_kv_cache_types(
     {
         auto fattn_check = [&](ggml_type check_k, ggml_type check_v) -> bool
         {
+            auto position_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
             auto q = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, q_proj.weight->ne[1] / num_attn_heads, 1, num_attn_heads);
-            auto k = ggml_new_tensor_3d(ctx, check_k, k_proj.weight->ne[1] / num_kv_heads, 1, num_kv_heads);
-            auto v = ggml_new_tensor_3d(ctx, check_v, v_proj.weight->ne[1] / num_kv_heads, 1, num_kv_heads);
-            auto o = ggml_flash_attn_ext(ctx, q, k, v, nullptr, 1.f / std::sqrt(static_cast<float>(k->ne[0])), 0.f, 0.f);
+            auto k = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k_proj.weight->ne[1] / num_kv_heads, 1, num_kv_heads);
+            auto v = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, v_proj.weight->ne[1] / num_kv_heads, 1, num_kv_heads);
+            auto cached_k = ggml_new_tensor(ctx, GGML_TYPE_F32, GGML_MAX_DIMS, k->ne);
+            auto cached_v = ggml_new_tensor(ctx, GGML_TYPE_F32, GGML_MAX_DIMS, v->ne);
+
+            cached_k = ggml_set_rows(ctx, cached_k, k, position_ids);
+            cached_v = ggml_set_rows(ctx, cached_v, v, position_ids);
+            if (!ggml_backend_supports_op(backend, cached_k) || !ggml_backend_supports_op(backend, cached_v))
+                return false;
+
+            auto o = ggml_flash_attn_ext(ctx, q, cached_k, cached_v, nullptr, 1.f / std::sqrt(static_cast<float>(k->ne[0])), 0.f, 0.f);
             return ggml_backend_supports_op(backend, o);
         };
 
@@ -622,11 +631,21 @@ static std::tuple<ggml_type, ggml_type> cosyvoice_check_kv_cache_types(
         auto attn_check = [&](ggml_type check_k, ggml_type check_v) -> bool
         {
             if (ggml_is_quantized(check_v)) return false;
+
+            auto position_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
             auto q = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, q_proj.weight->ne[1] / num_attn_heads, 1, num_attn_heads);
-            auto k = ggml_new_tensor_3d(ctx, check_k, k_proj.weight->ne[1] / num_kv_heads, 1, num_kv_heads);
-            auto v = ggml_new_tensor_3d(ctx, check_v, 1, v_proj.weight->ne[1] / num_kv_heads, num_kv_heads);
-            auto s = ggml_mul_mat(ctx, k, q);
-            auto o = ggml_mul_mat(ctx, v, s);
+            auto k = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k_proj.weight->ne[1] / num_kv_heads, 1, num_kv_heads);
+            auto v = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 1, v_proj.weight->ne[1] / num_kv_heads, num_kv_heads);
+            auto cached_k = ggml_new_tensor(ctx, check_k, GGML_MAX_DIMS, k->ne);
+            auto cached_v = ggml_new_tensor(ctx, check_v, GGML_MAX_DIMS, v->ne);
+
+            cached_k = ggml_set_rows(ctx, cached_k, k, position_ids);
+            cached_v = ggml_cpy(ctx, v, cached_v);
+            if (!ggml_backend_supports_op(backend, cached_k) || !ggml_backend_supports_op(backend, cached_v))
+                return false;
+
+            auto s = ggml_mul_mat(ctx, cached_k, q);
+            auto o = ggml_mul_mat(ctx, cached_v, s);
             return ggml_backend_supports_op(backend, o) && ggml_backend_supports_op(backend, s);
         };
 

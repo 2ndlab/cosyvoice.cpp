@@ -321,21 +321,16 @@ void cosyvoice_kv_cache::update_cache(ggml_context* ctx0, ggml_cgraph* gf, ggml_
 
     auto& layer = kv_cache_layers[cur_slot_idx * layers + layer_idx];
 
+    layer.k_view = ggml_set_rows(ctx0, layer.k, k, position_ids);
+    layer.k_view = ggml_view_4d(ctx0, layer.k_view, k->ne[0], cur_len + position_ids->ne[0], k->ne[2], k->ne[3], layer.k_view->nb[1], layer.k_view->nb[2], layer.k_view->nb[3], 0);
+
     if (fattn)
     {
-        layer.k_view = ggml_set_rows(ctx0, layer.k, k, position_ids);
-        layer.k_view = ggml_view_4d(ctx0, layer.k_view, k->ne[0], cur_len + position_ids->ne[0], k->ne[2], k->ne[3], layer.k_view->nb[1], layer.k_view->nb[2], layer.k_view->nb[3], 0);
-
         layer.v_view = ggml_set_rows(ctx0, layer.v, v, position_ids);
         layer.v_view = ggml_view_4d(ctx0, layer.v_view, v->ne[0], cur_len + position_ids->ne[0], v->ne[2], v->ne[3], layer.v_view->nb[1], layer.v_view->nb[2], layer.v_view->nb[3], 0);
     }
     else
     {
-        auto k_view = ggml_view_4d(ctx0, layer.k, k->ne[0], k->ne[1], k->ne[2], k->ne[3], layer.k->nb[1], layer.k->nb[2], layer.k->nb[3], layer.k->nb[1] * cur_len);
-        k_view = ggml_cpy(ctx0, k, k_view);
-        layer.k_view = ggml_view_4d(ctx0, layer.k, k->ne[0], cur_len + k->ne[1], k->ne[2], k->ne[3], layer.k->nb[1], layer.k->nb[2], layer.k->nb[3], 0);
-        layer.k_view->src[0] = k_view;
-
         v = ggml_permute(ctx0, v, 1, 0, 2, 3);
         auto v_view = ggml_view_4d(ctx0, layer.v, v->ne[0], v->ne[1], v->ne[2], v->ne[3], layer.v->nb[1], layer.v->nb[2], layer.v->nb[3], layer.v->nb[0] * cur_len);
         v_view = ggml_cpy(ctx0, v, v_view);
