@@ -652,7 +652,6 @@ COSYVOICE_API bool cosyvoice_token2wav_ext(
     uint32_t                       n_tokens,
     float                          speed,
     cosyvoice_prompt_t             prompt,
-    uint32_t*                      offset,
     bool                           streaming,
     bool                           finalize,
     cosyvoice_generated_speech_ptr result
@@ -670,7 +669,6 @@ COSYVOICE_API bool cosyvoice_token2wav_ext(
 - `n_tokens`：语音 token 数量。
 - `speed`：语速系数。
 - `prompt`：提示句柄。
-- `offset`：输入/输出 token 偏移量，用于增量转换。
 - `streaming`：若为 true，增量转换（部分分块）。
 - `finalize`：若为 true，刷新并完成输出。
 - `result`：输出波形容器。

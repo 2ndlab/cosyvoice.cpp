@@ -652,7 +652,6 @@ COSYVOICE_API bool cosyvoice_token2wav_ext(
     uint32_t                       n_tokens,
     float                          speed,
     cosyvoice_prompt_t             prompt,
-    uint32_t*                      offset,
     bool                           streaming,
     bool                           finalize,
     cosyvoice_generated_speech_ptr result
@@ -670,7 +669,6 @@ Converts speech tokens to waveform with additional options.
 - `n_tokens`: Number of speech tokens.
 - `speed`: Speech speed multiplier.
 - `prompt`: Prompt handle.
-- `offset`: Input/output token offset for incremental conversion.
 - `streaming`: If true, convert incrementally (partial chunks).
 - `finalize`: If true, flush and finalize the output.
 - `result`: Output waveform container.

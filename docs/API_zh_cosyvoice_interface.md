@@ -1,4 +1,4 @@
-# cosyvoice-interface.h API 参考
+﻿# cosyvoice-interface.h API 参考
 
 本文档覆盖 `include/cosyvoice-interface.h` 中声明的全部符号，包含 C++ 接口方法。
 运行时支持通过多个 worker 槽实现并发推理；不同上下文可以绑定到不同 worker，同时共享已加载的模型资源。
@@ -71,7 +71,6 @@ struct cosyvoice_model_context
         uint32_t                       n_tokens,
         float                          speed,
         cosyvoice_prompt_t             prompt,
-        uint32_t*                      offset,
         bool                           streaming,
         bool                           finalize,
         cosyvoice_generated_speech_ptr result
@@ -830,7 +829,6 @@ virtual bool token2wav_ext(
     uint32_t                       n_tokens,
     float                          speed,
     cosyvoice_prompt_t             prompt,
-    uint32_t*                      offset,
     bool                           streaming,
     bool                           finalize,
     cosyvoice_generated_speech_ptr result
@@ -847,7 +845,6 @@ virtual bool token2wav_ext(
 - `n_tokens`：token 数量。
 - `speed`：语速系数。
 - `prompt`：提示句柄。
-- `offset`：输入/输出 token 偏移量，用于增量转换。
 - `streaming`：若为 true，增量转换。
 - `finalize`：若为 true，刷新并完成输出。
 - `result`：输出波形容器。
