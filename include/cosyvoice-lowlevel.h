@@ -318,7 +318,6 @@ COSYVOICE_API bool cosyvoice_token2wav_ext(
     uint32_t                       n_tokens,
     float                          speed,
     cosyvoice_prompt_t             prompt,
-    uint32_t*                      offset,
     bool                           streaming,
     bool                           finalize,
     cosyvoice_generated_speech_ptr result

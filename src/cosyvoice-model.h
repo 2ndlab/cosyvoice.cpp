@@ -77,6 +77,7 @@ struct cosyvoice_worker_context
     uint32_t chunk_size;
     std::vector<float> flow_cache;
     std::vector<uint32_t> chunk_boundaries;
+    uint32_t offset{0};
     std::unique_ptr<char[]> batch_buffer;
     std::unique_ptr<float[]> nucleus_probs;
     uint32_t nucleus_probs_capacity;
@@ -196,7 +197,7 @@ struct cosyvoice_model_3 : cosyvoice_model
     bool llm_job(const int* text, uint32_t text_len, cosyvoice_prompt_t prompt);
     bool llm_job_ext(const int* text, uint32_t text_len, cosyvoice_prompt_t prompt, uint32_t max_new_tokens, bool* final);
     bool token2wav(const int* token_ids, uint32_t n_tokens, float speed, cosyvoice_prompt_t prompt, cosyvoice_generated_speech_ptr result);
-    bool token2wav_ext(const int* token_ids, uint32_t n_tokens, float speed, cosyvoice_prompt_t prompt, uint32_t* offset, bool streaming, bool finalize, cosyvoice_generated_speech_ptr result);
+    bool token2wav_ext(const int* token_ids, uint32_t n_tokens, float speed, cosyvoice_prompt_t prompt, bool streaming, bool finalize, cosyvoice_generated_speech_ptr result);
 
     void get_memory_usage(cosyvoice_memory_usage_t* usage);
     void get_total_memory_usage(cosyvoice_memory_usage_t* usage);

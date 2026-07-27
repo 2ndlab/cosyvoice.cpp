@@ -302,7 +302,7 @@ static void set_graph_backends(ggml_cgraph* gf, ggml_backend_sched_t sched, ggml
 
 bool cosyvoice_model_3::token2wav(const int* token_ids, uint32_t n_tokens, float speed, cosyvoice_prompt_t prompt, cosyvoice_generated_speech_ptr result)
 {
-    return token2wav_ext(token_ids, n_tokens, speed, prompt, nullptr, false, true, result);
+    return token2wav_ext(token_ids, n_tokens, speed, prompt, false, true, result);
 }
 
 template<int n>
@@ -375,14 +375,9 @@ struct dit_sched_config
     }
 };
 
-bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, float speed, cosyvoice_prompt_t prompt, uint32_t* offset, bool streaming, bool finalize, cosyvoice_generated_speech_ptr result)
+bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, float speed, cosyvoice_prompt_t prompt, bool streaming, bool finalize, cosyvoice_generated_speech_ptr result)
 {
     use_count_guard _guard(this);
-    if (streaming && offset && *offset == 0)
-    {
-        worker->flow_cache.clear();
-        worker->chunk_boundaries.clear();
-    }
 
     const auto& params = shared->params;
     auto& sched = worker->sched;
@@ -409,7 +404,7 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
 
     // Phase 1: Flow encode
     ggml_cgraph* gf = new_cgraph(ctx0.get());
-    auto [mu, spks, conds, cut_len] = flow.build_cgraph_encode(ctx0.get(), token, prompt_token, prompt_feat, embedding, op_caps, (flow.decoder.diffusion_steps - params.dit_kv_fixed_slots - params.dit_kv_offloadable_slots) == 0 && offset ? *offset : 0, streaming);
+    auto [mu, spks, conds, cut_len] = flow.build_cgraph_encode(ctx0.get(), token, prompt_token, prompt_feat, embedding, op_caps, (flow.decoder.diffusion_steps - params.dit_kv_fixed_slots - params.dit_kv_offloadable_slots) == 0 && streaming ? worker->offset : 0, streaming);
     const auto seq_len = mu->ne[1];
     auto ditctx = flow.decoder.prepare_context(ctx1.get(), mu, spks, conds);
     do
@@ -434,19 +429,19 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
         }
     } while (false);
 
-    dit_sched_config<flow.decoder.diffusion_steps> config(params, cut_len, offset ? *offset : 0, streaming, kv_cache->can_reuse());
-    if (offset)
-        if (flow.decoder.diffusion_steps == params.dit_kv_fixed_slots + params.dit_kv_offloadable_slots)
-            *offset += seq_len;
-        else
-            *offset = seq_len;
-
-    if (streaming && offset)
-        worker->chunk_boundaries.push_back(*offset);
-
-    if (offset)
+    dit_sched_config<flow.decoder.diffusion_steps> config(params, cut_len, streaming ? worker->offset : 0, streaming, kv_cache->can_reuse());
+    if (streaming)
     {
-        const auto chunk_len = *offset - (worker->chunk_boundaries.size() > 1 ? worker->chunk_boundaries.rbegin()[1] : 0);
+        if (finalize)
+            worker->offset = 0;
+        else if (flow.decoder.diffusion_steps == params.dit_kv_fixed_slots + params.dit_kv_offloadable_slots)
+            worker->offset += seq_len;
+        else
+            worker->offset = seq_len;
+
+        worker->chunk_boundaries.push_back(worker->offset);
+
+        const auto chunk_len = worker->offset - (worker->chunk_boundaries.size() > 1 ? worker->chunk_boundaries.rbegin()[1] : 0);
         if (kv_cache->cur_len + chunk_len >= params.dit_kv_cache_length)
             kv_cache->cur_len = params.dit_kv_cache_length - chunk_len;
     }
@@ -590,7 +585,7 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
 
     // Phase 3: Copy flow output to speech_feat (persistent buffer)
     ggml_reset(ctx1.get());
-    const auto cache_length = streaming && offset ? static_cast<int64_t>(worker->flow_cache.size() / feat->ne[0]) : 0;
+    const auto cache_length = streaming ? static_cast<int64_t>(worker->flow_cache.size() / feat->ne[0]) : 0;
     ggml_tensor* speech_feat = ggml_new_tensor_2d(ctx1.get(), feat->type, feat->ne[0], feat->ne[1] + cache_length);
     if (cache_length != 0)
     {
@@ -613,21 +608,28 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
         ggml_backend_tensor_copy_async(backend.get(), backend.get(), feat, speech_feat);
     }
 
-    if (!finalize)
-    {
-        const auto overlap = static_cast<int64_t>(shared->hift_overlap);
-        const auto n_feat_frames = feat->ne[1];
-        const auto frames_to_keep = std::min(overlap, n_feat_frames);
-        const auto elements_to_keep = static_cast<size_t>(frames_to_keep * feat->ne[0]);
-
-        worker->flow_cache.resize(elements_to_keep);
-        if (frames_to_keep > 0)
+    if (streaming)
+        if (finalize)
         {
-            const auto byte_offset = static_cast<size_t>((n_feat_frames - frames_to_keep) * feat->nb[1]);
-            const auto byte_size = static_cast<size_t>(frames_to_keep * feat->nb[1]);
-            ggml_backend_tensor_get_async(backend.get(), feat, worker->flow_cache.data(), byte_offset, byte_size);
+            worker->chunk_boundaries.clear();
+            ggml_backend_synchronize(backend.get());
+            worker->flow_cache.clear();
         }
-    }
+        else
+        {
+            const auto overlap = static_cast<int64_t>(shared->hift_overlap);
+            const auto n_feat_frames = feat->ne[1];
+            const auto frames_to_keep = std::min(overlap, n_feat_frames);
+            const auto elements_to_keep = static_cast<size_t>(frames_to_keep * feat->ne[0]);
+
+            worker->flow_cache.resize(elements_to_keep);
+            if (frames_to_keep > 0)
+            {
+                const auto byte_offset = static_cast<size_t>((n_feat_frames - frames_to_keep) * feat->nb[1]);
+                const auto byte_size = static_cast<size_t>(frames_to_keep * feat->nb[1]);
+                ggml_backend_tensor_get_async(backend.get(), feat, worker->flow_cache.data(), byte_offset, byte_size);
+            }
+        }
 
     if (config[flow.decoder.diffusion_steps - 1].cache_kv)
         if (finalize)

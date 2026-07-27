@@ -349,9 +349,9 @@ bool cosyvoice_token2wav(cosyvoice_context_t ctx, const int* token_ids, uint32_t
     return ctx->token2wav(token_ids, n_tokens, speed, prompt, generated_speech);
 }
 
-bool cosyvoice_token2wav_ext(cosyvoice_context_t ctx, const int* token_ids, uint32_t n_tokens, float speed, cosyvoice_prompt_t prompt, uint32_t* offset, bool streaming, bool finalize, cosyvoice_generated_speech_ptr result)
+bool cosyvoice_token2wav_ext(cosyvoice_context_t ctx, const int* token_ids, uint32_t n_tokens, float speed, cosyvoice_prompt_t prompt, bool streaming, bool finalize, cosyvoice_generated_speech_ptr result)
 {
-    return ctx->token2wav_ext(token_ids, n_tokens, speed, prompt, offset, streaming, finalize, result);
+    return ctx->token2wav_ext(token_ids, n_tokens, speed, prompt, streaming, finalize, result);
 }
 
 static bool check_length(cosyvoice_prompt_t prompt, uint32_t text_len, uint32_t n_max_seq)
@@ -421,7 +421,6 @@ bool cosyvoice_tts_stream(cosyvoice_context_t ctx, const int* text, uint32_t tex
     const auto chunk_tokens = ctx->get_chunk_tokens();
 
     ctx->llm_clear_accepted_tokens();
-    uint32_t offset = 0;
     uint32_t n_tokens = 0;
     bool final = false;
     do
@@ -436,7 +435,7 @@ bool cosyvoice_tts_stream(cosyvoice_context_t ctx, const int* text, uint32_t tex
         n_tokens = std::min(n_tokens + chunk_tokens, ctx->llm_get_n_accepted_tokens());
 
         cosyvoice_generated_speech result = {};
-        if (!ctx->token2wav_ext(ctx->llm_get_accepted_tokens(), n_tokens, speed, prompt, &offset, true, ctx->llm_get_n_accepted_tokens() == n_tokens, &result))
+        if (!ctx->token2wav_ext(ctx->llm_get_accepted_tokens(), n_tokens, speed, prompt, true, ctx->llm_get_n_accepted_tokens() == n_tokens, &result))
             return false;
 
         if (result.data && result.length > 0
