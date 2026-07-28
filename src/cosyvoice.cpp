@@ -31,7 +31,18 @@ use_count_guard::use_count_guard(cosyvoice_model* model) : worker(model->worker)
 }
 
 use_count_guard::use_count_guard(cosyvoice_context* ctx)
-    : use_count_guard(dynamic_cast<cosyvoice_model*>(ctx)) {}
+{
+    auto* model = dynamic_cast<cosyvoice_model*>(ctx);
+    worker = model->worker;
+    if(worker->use_count.load(std::memory_order_acquire) != 0)
+    {
+        std::unique_lock<std::mutex> lock(worker->cv_mutex);
+        worker->cv.wait(lock, [this]() {
+            return worker->use_count.load(std::memory_order_acquire) == 0;
+        });
+    }
+    worker->use_count.fetch_add(1, std::memory_order_relaxed);
+}
 
 use_count_guard::~use_count_guard()
 {

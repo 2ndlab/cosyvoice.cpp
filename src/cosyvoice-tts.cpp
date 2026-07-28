@@ -391,6 +391,14 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
     auto& cpu_backend = worker->cpu_backend;
     auto& token2wav_buffer = cv3_worker->token2wav_buffer;
     auto op_caps = shared->op_caps;
+    auto kv_cache = &worker->dit_kv_cache;
+
+    if (streaming && worker->offset == 0)
+    {
+        kv_cache->cur_len = 0;
+        worker->chunk_boundaries.clear();
+        worker->flow_cache.clear();
+    }
 
     ggml_reset(ctx0.get());
     ggml_reset(ctx1.get());
@@ -400,7 +408,6 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
     ggml_tensor* prompt_token = ggml_new_tensor_1d(ctx0.get(), GGML_TYPE_I32, prompt->flow_prompt_speech_tokens.second);
     ggml_tensor* prompt_feat = ggml_new_tensor_2d(ctx0.get(), GGML_TYPE_F32, prompt->prompt_speech_feat.shape[1], prompt->prompt_speech_feat.shape[0]);
     ggml_tensor* embedding = ggml_new_tensor_2d(ctx0.get(), GGML_TYPE_F32, prompt->flow_embedding.shape[1], prompt->flow_embedding.shape[0]);
-    auto kv_cache = &worker->dit_kv_cache;
 
     // Phase 1: Flow encode
     ggml_cgraph* gf = new_cgraph(ctx0.get());
@@ -608,28 +615,21 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
         ggml_backend_tensor_copy_async(backend.get(), backend.get(), feat, speech_feat);
     }
 
-    if (streaming)
-        if (finalize)
-        {
-            worker->chunk_boundaries.clear();
-            ggml_backend_synchronize(backend.get());
-            worker->flow_cache.clear();
-        }
-        else
-        {
-            const auto overlap = static_cast<int64_t>(shared->hift_overlap);
-            const auto n_feat_frames = feat->ne[1];
-            const auto frames_to_keep = std::min(overlap, n_feat_frames);
-            const auto elements_to_keep = static_cast<size_t>(frames_to_keep * feat->ne[0]);
+    if (streaming && !finalize)
+    {
+        const auto overlap = static_cast<int64_t>(shared->hift_overlap);
+        const auto n_feat_frames = feat->ne[1];
+        const auto frames_to_keep = std::min(overlap, n_feat_frames);
+        const auto elements_to_keep = static_cast<size_t>(frames_to_keep * feat->ne[0]);
 
-            worker->flow_cache.resize(elements_to_keep);
-            if (frames_to_keep > 0)
-            {
-                const auto byte_offset = static_cast<size_t>((n_feat_frames - frames_to_keep) * feat->nb[1]);
-                const auto byte_size = static_cast<size_t>(frames_to_keep * feat->nb[1]);
-                ggml_backend_tensor_get_async(backend.get(), feat, worker->flow_cache.data(), byte_offset, byte_size);
-            }
+        worker->flow_cache.resize(elements_to_keep);
+        if (frames_to_keep > 0)
+        {
+            const auto byte_offset = static_cast<size_t>((n_feat_frames - frames_to_keep) * feat->nb[1]);
+            const auto byte_size = static_cast<size_t>(frames_to_keep * feat->nb[1]);
+            ggml_backend_tensor_get_async(backend.get(), feat, worker->flow_cache.data(), byte_offset, byte_size);
         }
+    }
 
     if (config[flow.decoder.diffusion_steps - 1].cache_kv)
         if (finalize)

@@ -558,6 +558,7 @@ void cosyvoice_model::request_stop()
         return worker->use_count.load(std::memory_order_acquire) == 0;
     });
 
+    worker->offset = 0;
     worker->stop_flag.store(false, std::memory_order_release);
 }
 
