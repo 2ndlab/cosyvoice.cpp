@@ -422,39 +422,46 @@ bool cosyvoice_tts(cosyvoice_context_t ctx, const int* text, uint32_t text_len, 
 
 bool cosyvoice_tts_stream(cosyvoice_context_t ctx, const int* text, uint32_t text_len, float speed, cosyvoice_prompt_t prompt, cosyvoice_tts_audio_callback_t callback, void* user_data)
 {
-    use_count_guard guard(ctx);
-
-    cosyvoice_context_params_t params;
-    ctx->get_context_params(&params);
-    if (!check_length(prompt, text_len, params.n_max_seq))
-        return false;
-
-    const auto chunk_tokens = ctx->get_chunk_tokens();
-
-    ctx->llm_clear_accepted_tokens();
-    uint32_t n_tokens = 0;
-    bool final = false;
-    do
     {
-        if (ctx->stop_requested())
+        cosyvoice_context_params_t params;
+        ctx->get_context_params(&params);
+        if (!check_length(prompt, text_len, params.n_max_seq))
             return false;
+    }
 
-        if (!final)
-            if (!ctx->llm_job_ext(text, text_len, prompt, chunk_tokens + 1, &final))
+    {
+        use_count_guard guard(ctx);
+
+        const auto chunk_tokens = ctx->get_chunk_tokens();
+
+        ctx->llm_clear_accepted_tokens();
+        uint32_t n_tokens = 0;
+        bool final = false;
+        do
+        {
+            if (ctx->stop_requested())
                 return false;
 
-        n_tokens = std::min(n_tokens + chunk_tokens, ctx->llm_get_n_accepted_tokens());
+            if (!final && !ctx->llm_job_ext(text, text_len, prompt, chunk_tokens + 1, &final))
+                goto cleanup;
 
-        cosyvoice_generated_speech result = {};
-        if (!ctx->token2wav_ext(ctx->llm_get_accepted_tokens(), n_tokens, speed, prompt, true, ctx->llm_get_n_accepted_tokens() == n_tokens, &result))
-            return false;
+            n_tokens = std::min(n_tokens + chunk_tokens, ctx->llm_get_n_accepted_tokens());
 
-        if (result.data && result.length > 0
-            && !callback(result.data, result.length, user_data))
-            return false;
-    } while (n_tokens != ctx->llm_get_n_accepted_tokens());
+            cosyvoice_generated_speech result = {};
+            if (!ctx->token2wav_ext(ctx->llm_get_accepted_tokens(), n_tokens, speed, prompt, true, ctx->llm_get_n_accepted_tokens() == n_tokens, &result))
+                goto cleanup;
 
-    return true;
+            if (result.data && result.length > 0
+                && !callback(result.data, result.length, user_data))
+                goto cleanup;
+        } while (n_tokens != ctx->llm_get_n_accepted_tokens());
+
+        return true;
+    }
+
+cleanup:
+    ctx->request_stop();
+    return false;
 }
 
 uint32_t cosyvoice_get_chunk_tokens(cosyvoice_context_t ctx)

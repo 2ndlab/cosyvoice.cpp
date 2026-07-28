@@ -546,18 +546,17 @@ uint32_t cosyvoice_model::get_n_workers()
 void cosyvoice_model::request_stop()
 {
     if (worker->use_count.load(std::memory_order_acquire) == 0)
-    {
-        worker->stop_flag.store(false, std::memory_order_release);
-        return;
-    }
+        goto cleanup;
 
     worker->stop_flag.store(true, std::memory_order_release);
+    {
+        std::unique_lock<std::mutex> lock(worker->cv_mutex);
+        worker->cv.wait(lock, [this]() {
+            return worker->use_count.load(std::memory_order_acquire) == 0;
+        });
+    }
 
-    std::unique_lock<std::mutex> lock(worker->cv_mutex);
-    worker->cv.wait(lock, [this]() {
-        return worker->use_count.load(std::memory_order_acquire) == 0;
-    });
-
+cleanup:
     worker->offset = 0;
     worker->stop_flag.store(false, std::memory_order_release);
 }
