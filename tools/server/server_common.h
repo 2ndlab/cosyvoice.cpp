@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -205,6 +206,22 @@ struct streaming_callback_context
     bool                        wav_header_written;
     std::string*                error_out;
     std::atomic<bool>*          aborted;
+};
+
+// RAII helper: monitors client connection via the shared thread pool.
+// checker() returns true when the client has disconnected.
+// On disconnect, the pool's polling thread calls cosyvoice_request_stop(model_ctx).
+struct connection_monitor
+{
+    std::shared_ptr<stop_thread_pool::monitor_entry> entry;
+    stop_thread_pool* pool = nullptr;
+
+    connection_monitor(std::function<bool()> checker, stop_thread_pool& p, cosyvoice_context_t model_ctx);
+    void join();
+    ~connection_monitor();
+
+    connection_monitor(const connection_monitor&) = delete;
+    connection_monitor& operator=(const connection_monitor&) = delete;
 };
 
 // Build a standard 44-byte RIFF/WAV header with a placeholder data size

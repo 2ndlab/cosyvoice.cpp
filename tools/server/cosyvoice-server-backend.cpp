@@ -598,16 +598,21 @@ void cosyvoice_server_register_api_routes(Server& server, server_runtime& runtim
             auto* vctx = voice_ctx;
             auto log_ctx_copy = log_ctx;
             auto req_copy = request;  // value copy for provider use
+            auto conn_checker = req.is_connection_closed;  // copy the socket-checker function
 
             res.set_chunked_content_provider(content_type,
-                [&rt, slot, req_copy, vctx, format, wav_header, has_wav, log_ctx_copy, applied_seed]
+                [&rt, slot, req_copy, vctx, format, wav_header, has_wav, log_ctx_copy, applied_seed, conn_checker]
                 (size_t /*offset*/, DataSink& sink) -> bool
                 {
+                    auto model_ctx = get_slot_model_context(rt, slot);
+                    connection_monitor mon(conn_checker, rt.stop_pool, model_ctx);
+
                     // Write WAV header first (for WAV output format)
                     if (has_wav && !wav_header.empty())
                     {
                         if (!sink.write(wav_header.data(), wav_header.size()))
                         {
+                            mon.join();
                             release_thread_slot(rt, slot);
                             sink.done();
                             return true;
@@ -643,6 +648,7 @@ void cosyvoice_server_register_api_routes(Server& server, server_runtime& runtim
                         ok = cosyvoice_tts_zero_shot_stream(vctx, req_copy.input.c_str(),
                             req_copy.speed, stream_cb, &cb_ctx);
 
+                    mon.join();
                     release_thread_slot(rt, slot);
                     sink.done();
 
@@ -667,6 +673,10 @@ void cosyvoice_server_register_api_routes(Server& server, server_runtime& runtim
 
         // ---- Non-streaming (blocking) path ----
         {
+            // Monitor client connection and stop generation if client disconnects
+            cosyvoice_context_t ns_model_ctx = get_slot_model_context(runtime, slot);
+            connection_monitor mon([&req]{ return req.is_connection_closed(); }, runtime.stop_pool, ns_model_ctx);
+
             cosyvoice_generated_speech generated = {};
 
             bool ok = false;
@@ -674,6 +684,8 @@ void cosyvoice_server_register_api_routes(Server& server, server_runtime& runtim
                 ok = cosyvoice_tts_instruct(voice_ctx, request.input.c_str(), request.instructions.c_str(), request.speed, &generated);
             else
                 ok = cosyvoice_tts_zero_shot(voice_ctx, request.input.c_str(), request.speed, &generated);
+
+            mon.join();
 
             if (!ok || !generated.data || generated.length == 0)
             {

@@ -617,3 +617,28 @@ std::string join_strings(const std::vector<std::string>& items, const char* sep)
     }
     return r;
 }
+
+// ---------------------------------------------------------------------------
+// connection_monitor - stops generation when client disconnects
+// ---------------------------------------------------------------------------
+
+connection_monitor::connection_monitor(std::function<bool()> checker, stop_thread_pool& p, cosyvoice_context_t model_ctx)
+    : pool(&p)
+{
+    if (model_ctx && checker)
+        entry = pool->register_monitor(std::move(checker), model_ctx);
+}
+
+void connection_monitor::join()
+{
+    if (entry)
+    {
+        auto e = std::move(entry);
+        pool->unregister_monitor(e);
+    }
+}
+
+connection_monitor::~connection_monitor()
+{
+    join();
+}

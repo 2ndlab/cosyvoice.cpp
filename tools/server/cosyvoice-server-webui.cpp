@@ -853,16 +853,21 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
             auto log_ctx_copy = log_ctx;
             auto text_copy    = text;      // value copy for provider
             auto instr_copy   = instructions; // value copy for provider
+            auto conn_checker = req.is_connection_closed;  // copy the socket-checker function
 
             res.set_chunked_content_provider(content_type,
-                [&rt, vctx, text_copy, instr_copy, speed, mode, fmt, wav_header, has_wav, log_ctx_copy, applied_seed]
+                [&rt, vctx, text_copy, instr_copy, speed, mode, fmt, wav_header, has_wav, log_ctx_copy, applied_seed, conn_checker]
                 (size_t /*offset*/, DataSink& sink) -> bool
                 {
+                    auto model_ctx = get_slot_model_context(rt, 0);
+                    connection_monitor mon(conn_checker, rt.stop_pool, model_ctx);
+
                     // Write WAV header first
                     if (has_wav && !wav_header.empty())
                     {
                         if (!sink.write(wav_header.data(), wav_header.size()))
                         {
+                            mon.join();
                             sink.done();
                             return true;
                         }
@@ -896,6 +901,7 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
                     else
                         ok = cosyvoice_tts_zero_shot_stream(vctx, text_copy.c_str(), speed, stream_cb, &cb_ctx);
 
+                    mon.join();
                     sink.done();
 
                     if (!ok && !aborted)
@@ -914,6 +920,10 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
 
         // ---- Non-streaming (blocking) path ----
         {
+            // Monitor client connection and stop generation if client disconnects
+            cosyvoice_context_t ns_model_ctx = runtime.model_slots[0].get();
+            connection_monitor mon([&req]{ return req.is_connection_closed(); }, runtime.stop_pool, ns_model_ctx);
+
             cosyvoice_generated_speech generated = {};
             bool ok = false;
 
@@ -929,6 +939,8 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
             {
                 ok = cosyvoice_tts_zero_shot(tts_ctx, text.c_str(), speed, &generated);
             }
+
+            mon.join();
 
             if (!ok || !generated.data || generated.length == 0)
             {
