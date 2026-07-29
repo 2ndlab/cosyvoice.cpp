@@ -80,6 +80,8 @@ Custom metadata strings are supported with repeated `-c/--custom-string`.
 ## Server Tool (`tools/server`)
 Executable name: `cosyvoice-server`
 
+> Inference stops as soon as possible when the client disconnects.
+
 The server runs in **two modes**:
 
 | Mode | Selector | Description |
@@ -665,6 +667,8 @@ This script prints per-request output file paths so you can listen and compare r
 
 ## CLI Tool (`tools/cli`)
 Executable name: `cosyvoice-cli`
+
+> Press `Ctrl+C` during inference to interrupt generation (stops as soon as possible).
 
 Show help:
 ```bash

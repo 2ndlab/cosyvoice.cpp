@@ -98,7 +98,7 @@ struct cosyvoice_model_context
     virtual void set_hift_rand_ini(const float* data) = 0;
 
     virtual void request_stop() = 0;
-    virtual bool stop_requested() = 0;
+    virtual bool is_stop_requested() = 0;
 };
 ```
 
@@ -1089,27 +1089,27 @@ virtual void request_stop() = 0;
 
 ### 说明
 
-请求当前 worker 的当前任务尽快停止。worker 完成当前操作后才响应，截止点之前的输出仍然有效。
+请求当前 worker 的任务停止并等待操作取消。清理内部上下文状态后返回。**必须在另一条线程调用**——在 stream 回调中调用会导致死锁。
 
 ### 返回值
 
 无返回值。
 
-## cosyvoice_model_context::stop_requested
+## cosyvoice_model_context::is_stop_requested
 
 ### 语法
 
 ```cpp
-virtual bool stop_requested() = 0;
+virtual bool is_stop_requested() = 0;
 ```
 
 ### 说明
 
-检查并原子清除停止请求标志。标志被原子重置，后续调用返回 `false`。
+检查当前 worker 是否有停止请求。不会清除标志。
 
 ### 返回值
 
-若自上次检查以来有停止请求则返回 `true`，否则返回 `false`。
+有停止请求则返回 `true`，否则返回 `false`。
 
 ## cosyvoice_tokenization_result
 

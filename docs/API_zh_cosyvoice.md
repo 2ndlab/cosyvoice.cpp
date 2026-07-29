@@ -1865,3 +1865,39 @@ COSYVOICE_API void cosyvoice_empty_buffer_cache(cosyvoice_context_t ctx);
 ### 返回值
 
 无返回值。
+
+## cosyvoice_request_stop
+
+### 语法
+
+```c
+COSYVOICE_API void cosyvoice_request_stop(cosyvoice_context_t ctx);
+```
+
+### 说明
+
+请求当前 worker 的任务停止并等待操作取消。清理内部上下文状态后返回。**必须在另一条线程调用**——在 stream 回调中调用会导致死锁。
+
+### 参数
+
+- `ctx`：模型上下文。
+
+## cosyvoice_is_stop_requested
+
+### 语法
+
+```c
+COSYVOICE_API bool cosyvoice_is_stop_requested(cosyvoice_context_t ctx);
+```
+
+### 说明
+
+检查当前 worker 是否有停止请求。立即返回。不会清除停止标志。
+
+### 参数
+
+- `ctx`：模型上下文。
+
+### 返回值
+
+有停止请求则返回 `true`，否则返回 `false`。

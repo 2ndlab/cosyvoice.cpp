@@ -98,7 +98,7 @@ struct cosyvoice_model_context
     virtual void set_hift_rand_ini(const float* data) = 0;
 
     virtual void request_stop() = 0;
-    virtual bool stop_requested() = 0;
+    virtual bool is_stop_requested() = 0;
 };
 ```
 
@@ -1037,27 +1037,27 @@ virtual void request_stop() = 0;
 
 ### Description
 
-Requests that the active worker's current job stop as soon as possible. The worker finishes the current operation before honouring the request, so output up to that point remains valid.
+Requests that the active worker's job stop and waits for cancellation. Cleans up internal context state before returning. Must be called from a separate thread — calling from a stream callback will deadlock.
 
 ### Returns
 
 No return value.
 
-## cosyvoice_model_context::stop_requested
+## cosyvoice_model_context::is_stop_requested
 
 ### Syntax
 
 ```cpp
-virtual bool stop_requested() = 0;
+virtual bool is_stop_requested() = 0;
 ```
 
 ### Description
 
-Checks and atomically clears the stop-requested flag for the active worker. Used internally by hot paths to detect stop requests. The flag is atomically reset so subsequent calls return `false`.
+Checks whether a stop was requested for the active worker. Does NOT clear the flag.
 
 ### Returns
 
-`true` if a stop was requested since the last check; `false` otherwise.
+`true` if a stop was requested; `false` otherwise.
 
 ## cosyvoice_tokenization_result
 

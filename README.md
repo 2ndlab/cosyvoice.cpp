@@ -11,9 +11,7 @@ Language: English | [简体中文](README_zh.md)
 
 > **Current status notice:** CPU, CUDA, Metal, and SYCL backends are currently working. The Vulkan backend currently fails to execute properly. Please review [Backend Test Status](#backend-test-status) before production use.
 
-C++/GGML port of the Python CosyVoice inference pipeline released by the original CosyVoice project, currently focused on **CosyVoice3**.
-
-This repository ships independent engineering work and does not contain official support commitments.
+C++/GGML port of the Python CosyVoice inference pipeline, currently focused on **CosyVoice3**.
 
 Supports **zero-shot**, **instruct**, and **cross-lingual** TTS modes with both synchronous and **streaming** output. The frontend pipeline (speech tokenizer + speaker embedding) handles reference audio processing, or pre-encoded `prompt_speech` can be reused across sessions to skip the ONNX frontend entirely.
 
@@ -25,21 +23,17 @@ This project provides:
 
 ## Contents
 - [Features](#features)
-- [Pre-converted Models](#pre-converted-models)
-- [Documentation](#documentation)
-- [AI Usage Disclosure](#ai-usage-disclosure)
 - [Quick Start](#quick-start)
+- [Pre-converted Models](#pre-converted-models)
 - [Inference Pipeline](#inference-pipeline)
-- [Build](#build)
-- [Dependency Resolution](#dependency-resolution)
-- [CMake Options](#cmake-options)
-- [Build Matrix (Typical)](#build-matrix-typical)
-- [GGML Backend/Build Options](#ggml-backendbuild-options)
-- [Using Custom Dependencies](#using-custom-dependencies)
-- [Model Conversion to GGUF](#model-conversion-to-gguf)
 - [Tooling Guide](#tooling-guide)
+- [Build](#build)
+- [Streaming TTS & DiT KV Cache](#streaming-tts--dit-kv-cache)
+- [Model Conversion to GGUF](#model-conversion-to-gguf)
 - [Backend Test Status](#backend-test-status)
 - [Troubleshooting](#troubleshooting)
+- [Documentation](#documentation)
+- [AI Usage Disclosure](#ai-usage-disclosure)
 - [Third-Party Notices](#third-party-notices)
 - [Licensing](#licensing)
 - [Contributing](#contributing)
@@ -52,6 +46,7 @@ This project provides:
 | **WebUI Dashboard** | Modern browser-based interface for loading/unloading models, registering speakers (via GGUF/audio extraction/mic recording), TTS generation with live playback, history, and full sampling control |
 | **Interactive REPL** | CLI interactive mode with slash commands for play, save, list, query, and seed control |
 | **Concurrent Serving** | Server `--concurrency` for parallel request handling |
+| **Inference Interruption** | Press `Ctrl+C` in CLI or disconnect from the server to stop generation as soon as possible — output up to that point remains valid |
 | **Model Quantization** | Quantize GGUF models to smaller formats (Q2_K through F16) with the built-in `quantize` tool |
 | **Streaming TTS** | Real-time speech generation with low-latency audio delivery via callback — delivers audio chunks as they are synthesized, before the full utterance completes |
 | **DiT KV Cache** | Avoid redundant attention recomputation across diffusion steps during streaming — configurable with fixed (device), offloadable (CPU), and uncached slot categories to trade memory vs. speed |
@@ -66,75 +61,7 @@ This project provides:
 | **Multiple Backends** | CPU, CUDA, Metal, SYCL (see [Backend Test Status](#backend-test-status)) |
 | **Cross-Platform** | Windows (x64), Linux (x86_64), macOS (arm64) — all tested in CI |
 
-## Streaming TTS & DiT KV Cache
-
-Streaming TTS delivers audio chunks incrementally via a callback function as they are synthesized, without waiting for the full utterance to complete. This enables real-time playback and lower perceived latency.
-
-The streaming pipeline introduces a **DiT KV cache** to avoid redundant computation. During non-streaming inference, the DiT module runs 10 diffusion steps, each computing self-attention over the full audio sequence — resulting in 10× attention recomputation. The KV cache stores intermediate key/value tensors across steps so that each position is computed only once.
-
-### Slot Organization
-
-The DiT KV cache is organized into **slots**, where each slot holds the KV cache for one diffusion step. With the default 10 steps, there can be at most 10 slots.
-
-Slots fall into three categories:
-
-| Category | Memory | Behavior |
-|----------|--------|----------|
-| **Fixed** | Stays on device (GPU) | Fastest; never offloaded |
-| **Offloadable** | Offloaded to CPU when not in use | Saves device memory at the cost of transfer latency |
-| **Uncached** | Not stored at all | Full attention recomputation every step, no extra memory |
-
-Total slots = `fixed + offloadable`. Remaining steps (10 − total) use full recomputation.
-
-The cache is large, so the default is 0 slots (all 10 steps fully recomputed). When enabled and the sequence exceeds the configured cache length, some positions are discarded — inference continues normally but output quality may degrade.
-
-> The DiT KV cache is **only used during streaming TTS**; non-streaming calls ignore it and always perform full recomputation.
-
-### Configuration
-
-DiT KV cache parameters are configured via `cosyvoice_context_params_v3_t` (C API) or the respective CLI/server `--dit-kv-*` flags:
-
-- `--dit-kv-type` / `dit_kv_cache_type`: Storage format (f32/f16/q8_0/...) for the DiT KV cache.
-- `--dit-kv-fixed-slots` / `dit_kv_fixed_slots`: Number of device-resident slots.
-- `--dit-kv-offloadable-slots` / `dit_kv_offloadable_slots`: Number of CPU-offloadable slots.
-- `--dit-kv-cache-length` / `dit_kv_cache_length`: Maximum sequence positions kept in the cache.
-
-Streaming is enabled via `--stream` flag on CLI/server. Chunk granularity is controlled by `--chunk-tokens` (default: 128 tokens per chunk).
-
-## Pre-converted Models
-
-Download ready-to-use GGUF models (no conversion needed):
-
-- **ModelScope**: <https://modelscope.cn/models/Lourdle/Fun-CosyVoice3-0.5B-2512-GGUF>
-- **Hugging Face**: <https://huggingface.co/Lourdle/Fun-CosyVoice3-0.5B-2512-GGUF>
-
-Pre-quantized variants (Q2_K through F16) are available at the links above.
-
-## Documentation
-- API index: [docs/API.md](docs/API.md)
-- Tooling guide: [docs/TOOLS.md](docs/TOOLS.md)
-- Android build guide: [docs/build-android.md](docs/build-android.md)
-
-## AI Usage Disclosure
-- Most core library code is written by the author.
-- Most tooling (cli, quantize, server) and documentation content is drafted and edited with AI assistance.
-- Small mistakes or implementation drift may still exist; when in doubt, treat source code and header files as the ground truth, and feel free to open an issue or PR.
-
-## Third-Party Notices
-- See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for bundled dependency license details.
-- FFT implementation (`src/fft.cpp`) references/adapts KissFFT (BSD-3-Clause) with project-specific SIMD optimizations; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-- Tokenizer implementation is adapted from llama.cpp (MIT).
-
-## Licensing
-- **Repository code**: MIT (`LICENSE`).
-- **Upstream reference**: the original CosyVoice project code and models are under Apache-2.0.
-- **Implementation note**: this repository is an independent C++/GGML re-implementation based on model architecture and inference behavior, and is not an official fork or release.
-- **GGUF model artifacts**: published model files remain under Apache-2.0. See [Pre-converted Models](#pre-converted-models) for download links.
-- **Model license file**: [MODEL_LICENSE.md](MODEL_LICENSE.md)
-
 ## Quick Start
-
-See [docs/TOOLS.md](docs/TOOLS.md) for detailed usage of all tools (`cosyvoice-cli`, `cosyvoice-server`, `quantize`).
 
 ### Pre-built Releases
 
@@ -144,23 +71,25 @@ The releases provided in this repository do not bundle the GGML backend librarie
 3. Place the `cosyvoice` executables into the same directory as the GGML backend shared libraries (`ggml.dll`, `ggml-cuda.dll`, etc.).
 4. Run from that directory.
 
-> **Known issue with pre-built GGML CUDA backend (Issue [#15](https://github.com/Lourdle/cosyvoice.cpp/issues/15)):** Some users have reported noise in generated audio when using pre-built GGML binaries from `llama.cpp` releases with the CUDA backend. I testing confirmed this issue with pre-compiled GGML CUDA builds, while self-compiled GGML from source did not exhibit the problem. If you encounter noise when using the CUDA backend with pre-built GGML, we recommend building both this project and GGML from source as a workaround. Refer to the [Build](#build) section for instructions.
+> **Known issue with pre-built GGML CUDA backend (Issue [#15](https://github.com/Lourdle/cosyvoice.cpp/issues/15)):** Some users have reported noise in generated audio when using pre-built GGML binaries from `llama.cpp` releases with the CUDA backend. Testing confirmed this issue with pre-compiled GGML CUDA builds, while self-compiled GGML from source did not exhibit the problem. If you encounter noise when using the CUDA backend with pre-built GGML, we recommend building both this project and GGML from source as a workaround. Refer to the [Build](#build) section for instructions.
 
 ### Build from Source
 
-> **Server build requirements (non-Windows):** On Linux/macOS, `cosyvoice-server` needs two
-> extra capabilities beyond a standard C++20 toolchain — a C23-capable **C compiler** (GCC 15+
-> or Clang 19+) for WebUI resource embedding, and a **Ninja** generator (1.11+) with a modern
-> C++ compiler (GCC 14+ / Clang 16+ / AppleClang 16+) for C++20 module scanning (auto-falls
-> back to PCH if unsupported). Windows covers both with the default Visual Studio toolchain.
-> See the [Build](#build) section for details.
-
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
-Outputs in `build/bin` (executables) and `build/lib` (libraries). See [Build](#build) for detailed options.
+Outputs in `build/bin` (executables) and `build/lib` (libraries). See [Build](#build) for detailed options, server-specific requirements, and backend configuration.
+
+## Pre-converted Models
+
+Download ready-to-use GGUF models (no conversion needed):
+
+- **ModelScope**: <https://modelscope.cn/models/Lourdle/Fun-CosyVoice3-0.5B-2512-GGUF>
+- **Hugging Face**: <https://huggingface.co/Lourdle/Fun-CosyVoice3-0.5B-2512-GGUF>
+
+Pre-quantized variants (Q2_K through F16) are available at the links above.
 
 ## Inference Pipeline
 
@@ -187,6 +116,15 @@ flowchart TD
   - `zero-shot` mode requires `--prompt-text`; `instruct` and `cross-lingual` modes ignore it.
 - **Path 2 (reuse)**: Run frontend once via `--frontend-only` / `--prompt-speech-output`, then skip it for all subsequent synthesis. This avoids re-running the ONNX model each time.
 
+## Tooling Guide
+
+This repository includes three user-facing tools:
+- `cosyvoice-cli`: local file-based TTS generation (supports prompt_speech reuse and frontend + TTS flow).
+- `cosyvoice-server`: OpenAI Speech-compatible HTTP API server for service-style integration.
+- `quantize`: GGUF quantization utility to convert model files to smaller/faster formats. Supports per-tensor quantization type mapping via PCRE2 regex patterns (`-M/--tensor-map`). Pre-built profiles for CosyVoice3-2512 are available under `tools/quantize/profiles/`.
+
+Full commands, options, and examples are documented in [docs/TOOLS.md](docs/TOOLS.md).
+
 ## Build
 
 ### Requirements
@@ -196,46 +134,12 @@ flowchart TD
 - x86 CPU with AVX2 support is currently required for parts of the CPU data path
 - For CPU math-heavy paths (for example `log` and trigonometric functions), SIMD acceleration is currently enabled only in MSVC builds; other toolchains currently fall back to scalar implementations
 
-> **Server build considerations (non-Windows):** On Linux/macOS, `cosyvoice-server` requires
-> extra attention in two areas:
->
-> **1. C23 `#embed` for WebUI resources**
-> `resource_embed.c` uses the C23 `#embed` directive to bundle the WebUI (HTML/CSS/JS)
-> into the executable, which needs a **C compiler** that supports C23 — GCC 15+ or Clang 19+.
-> Windows embeds resources via its native RC tool, so no special C compiler is needed.
->
-> Example — specifying a C23-capable C compiler:
-> ```bash
-> # Ubuntu/Debian — use clang-20 as the C compiler
-> sudo apt install clang-20
-> cmake -B build -DCMAKE_C_COMPILER=clang-20 -DCMAKE_BUILD_TYPE=Release
-> cmake --build build --config Release
-> ```
->
-> **2. C++20 modules**
-> The server uses C++20 module interfaces (`.ixx` files for nlohmann-json and cpp-httplib).
-> A **Ninja** generator (1.11+) with a modern C++ compiler (GCC 14+ / Clang 16+ /
-> AppleClang 16+ / MSVC 14.34+) is **recommended** for full module scanning:
-> - Add `-G Ninja` to your cmake configure command.
-> - Windows: the Visual Studio generator fully supports module scanning — no extra flags.
-> - Unsupported generators or older compilers: CMake detects the gap and automatically
->   **falls back to precompiled headers (PCH)**.
->
-> Recommended full configure for Linux/macOS:
-> ```bash
-> cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-> cmake --build build --config Release
-> ```
-
 Backend/runtime requirements depend on your build options (CUDA/Vulkan/CPU, ONNX Runtime, ICU, etc.).
 
-### 1) Configure
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-```
+### Basic Build
 
-### 2) Build
 ```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
@@ -243,49 +147,143 @@ Build outputs are placed in:
 - `build/bin` (executables/runtime DLLs)
 - `build/lib` (libraries)
 
-## Dependency Resolution
+### Server Build Considerations (non-Windows)
+
+On Linux/macOS, `cosyvoice-server` requires extra attention in two areas:
+
+**C23 `#embed` for WebUI resources**
+The WebUI resource embedding uses the C23 `#embed` directive to bundle HTML/CSS/JS into the executable, which needs a **C compiler** that supports C23 — GCC 15+ or Clang 19+. Windows embeds resources via its native RC tool, so no special C compiler is needed.
+
+Example — specifying a C23-capable C compiler:
+```bash
+# Ubuntu/Debian — use clang-20 as the C compiler
+sudo apt install clang-20
+cmake -B build -DCMAKE_C_COMPILER=clang-20 -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+```
+
+**C++20 modules**
+The server uses C++20 module interfaces (for nlohmann-json and cpp-httplib). A **Ninja** generator (1.11+) with a modern C++ compiler (GCC 14+ / Clang 16+ / AppleClang 16+ / MSVC 14.34+) is **recommended** for full module scanning:
+- Add `-G Ninja` to your cmake configure command.
+- Windows: the Visual Studio generator fully supports module scanning — no extra flags.
+- Unsupported generators or older compilers: CMake detects the gap and automatically **falls back to precompiled headers (PCH)**.
+
+Recommended full configure for Linux/macOS:
+```bash
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+```
+
+### CMake Options
+
+**Project Options**
+
+| Option | Values | Default | Description |
+|---|---|---|---|
+| `BUILD_SHARED_LIBS` | ON / OFF | ON | Build cosyvoice as a shared library |
+| `COSYVOICE_NO_AUDIO` | ON / OFF | OFF | Disable audio helper APIs |
+| `COSYVOICE_NO_FRONTEND` | ON / OFF | OFF | Disable ONNX frontend |
+| `COSYVOICE_NO_ICU` | ON / OFF | OFF | Disable ICU text normalization |
+| `COSYVOICE_AUDIO_BACKEND` | MINIAUDIO / FFMPEG | MINIAUDIO | Audio encoding/decoding backend |
+| `COSYVOICE_CLI_NO_PLAYBACK` | ON / OFF | unset (follows `COSYVOICE_NO_AUDIO`) | Disable CLI playback |
+| `COSYVOICE_SERVER_NO_WEBUI` | ON / OFF | OFF | Disable embedded WebUI; server starts in API-only mode. Removes C23 `#embed` dependency on non-Windows. |
+| `COSYVOICE_SERVER_DEFAULT_MODE` | WEBUI / API | WEBUI | Default server mode when neither `--api` nor `--webui` is given. Set to `API` for headless deployments. |
+
+**Backend Options**
+
+GGML backend options are passed through from GGML CMake. Typical examples:
+
+```bash
+# CUDA backend
+cmake -B build -DGGML_CUDA=ON
+
+# Vulkan backend
+cmake -B build -DGGML_VULKAN=ON
+```
+
+Refer to the [GGML documentation](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md) for the full list of backend-specific options and recommended settings.
+
+**Dependency Path Options**
+
+| Option | Description |
+|---|---|
+| `GGML_SOURCE_DIR=<path>` | Path to GGML sources (default: `vendor/ggml`). If missing, CMake auto-clones. |
+| `ICU_PREBUILT_DIR=<path>` | Path to ICU prebuilt binaries (default: `<build_dir>/_deps/icu`) |
+| `ORT_PREBUILT_DIR=<path>` | Path to ONNX Runtime prebuilt binaries (default: `<build_dir>/_deps/onnxruntime`) |
+| `FFMPEG_PREBUILT_DIR=<path>` | Path to FFmpeg prebuilt binaries |
+| `SIMDE_INCLUDE_DIR=<path>` | Required for ARM64/aarch64 (including Android cross-compilation) |
+
+### Build Matrix
+
+| Scenario | Recommended CMake flags |
+|---|---|
+| CUDA backend | `-DGGML_CUDA=ON` |
+| Vulkan backend | `-DGGML_VULKAN=ON` |
+| CPU-only | no backend flag required |
+| Core-only (no frontend / ICU) | `-DCOSYVOICE_NO_FRONTEND=ON -DCOSYVOICE_NO_ICU=ON` |
+| No-audio helper API | `-DCOSYVOICE_NO_AUDIO=ON` |
+| Disable CLI playback | `-DCOSYVOICE_CLI_NO_PLAYBACK=ON` |
+
+Practical build examples:
+
+```bash
+# Core-only build (no ONNX frontend, no ICU text norm)
+cmake -B build-core -DCMAKE_BUILD_TYPE=Release -DCOSYVOICE_NO_FRONTEND=ON -DCOSYVOICE_NO_ICU=ON
+
+# No-audio build (CLI output forced to WAV fallback path)
+cmake -B build-noaudio -DCMAKE_BUILD_TYPE=Release -DCOSYVOICE_NO_AUDIO=ON
+
+# Disable CLI playback (audio helper APIs still available)
+cmake -B build-noplay -DCMAKE_BUILD_TYPE=Release -DCOSYVOICE_CLI_NO_PLAYBACK=ON
+```
+
+### Dependency Resolution
+
 The top-level CMake project resolves dependencies in this order:
 
-- **PCRE2**
-  - Built from `vendor/pcre2` as static libraries (`pcre2-8`, `pcre2-16`).
-- **GGML**
-  - Uses `GGML_SOURCE_DIR` (default: `vendor/ggml`).
-  - If missing, CMake clones `https://github.com/ggml-org/ggml.git` automatically.
-- **ICU** (used by text normalization unless disabled with `COSYVOICE_NO_ICU`)
-  - Resolution order: `ICU_PREBUILT_DIR` -> `find_package(ICU)` -> Windows auto-download -> system ICU on Linux/macOS.
-- **ONNX Runtime** (used by the frontend unless disabled with `COSYVOICE_NO_FRONTEND`)
-  - Resolution order: `ORT_PREBUILT_DIR` -> `find_package(onnxruntime)` -> auto-download.
+- **PCRE2**: Built from `vendor/pcre2` as static libraries (`pcre2-8`, `pcre2-16`).
+- **GGML**: Uses `GGML_SOURCE_DIR` (default: `vendor/ggml`). If missing, CMake clones `https://github.com/ggml-org/ggml.git` automatically.
+- **ICU** (used by text normalization unless disabled with `COSYVOICE_NO_ICU`): Resolution order: `ICU_PREBUILT_DIR` → `find_package(ICU)` → Windows auto-download → system ICU on Linux/macOS.
+- **ONNX Runtime** (used by the frontend unless disabled with `COSYVOICE_NO_FRONTEND`): Resolution order: `ORT_PREBUILT_DIR` → `find_package(onnxruntime)` → auto-download.
 
-Useful cache variables:
-- `GGML_SOURCE_DIR`
-- `ICU_PREBUILT_DIR`
-- `ORT_PREBUILT_DIR`
+On Windows, prebuilt dependency DLLs are copied next to built executables.
 
-Default values:
-- `GGML_SOURCE_DIR=vendor/ggml`
-- `ICU_PREBUILT_DIR=<build_dir>/_deps/icu`
-- `ORT_PREBUILT_DIR=<build_dir>/_deps/onnxruntime`
+### Using Custom Dependencies
 
-Notes:
-- If `GGML_SOURCE_DIR` does not contain GGML sources, CMake will try to clone GGML.
-- If ICU/ONNX Runtime are not found by `find_package`, CMake will use or download prebuilt binaries into the configured prebuilt directories.
-- On Windows, prebuilt dependency DLLs are copied next to built executables.
+You can point CMake to custom dependency locations with cache variables:
 
-## Audio backend & FFmpeg
+```bash
+cmake -B build \
+  -DGGML_SOURCE_DIR=/path/to/ggml \
+  -DICU_PREBUILT_DIR=/path/to/icu \
+  -DORT_PREBUILT_DIR=/path/to/onnxruntime \
+  -DSIMDE_INCLUDE_DIR=/path/to/simde
+```
+
+You can also use the default prebuilt locations under your build directory:
+- `<build_dir>/_deps/icu`
+- `<build_dir>/_deps/onnxruntime`
+
+If you place files there with the expected layout, CMake will pick them up automatically (without extra `-D` flags).
+
+Expected markers/layout:
+- ICU: `include/unicode/utypes.h` (and platform libs/dlls under `lib*` / `bin*`)
+- ONNX Runtime: `include/onnxruntime_c_api.h` and runtime library files under `lib`
+
+### Audio Backend & FFmpeg
 
 This project supports two audio backends for encoding/decoding helper APIs:
 
 - `MINIAUDIO` (default): provides WAV I/O and basic PCM helpers.
 - `FFMPEG` (optional): enables encoding/decoding for additional formats when the linked FFmpeg runtime provides the required encoders.
 
-Control the audio backend via CMake: set `COSYVOICE_AUDIO_BACKEND` to `MINIAUDIO` or `FFMPEG`.
-Default: `MINIAUDIO`.
+Control the audio backend via CMake: set `COSYVOICE_AUDIO_BACKEND` to `MINIAUDIO` or `FFMPEG`. Default: `MINIAUDIO`.
 
 Examples:
 ```bash
-cmake -S . -B build -DCOSYVOICE_AUDIO_BACKEND=MINIAUDIO
-cmake -S . -B build -DCOSYVOICE_AUDIO_BACKEND=FFMPEG
-cmake -S . -B build -DCOSYVOICE_AUDIO_BACKEND=FFMPEG -DFFMPEG_PREBUILT_DIR=/path/to/ffmpeg
+cmake -B build -DCOSYVOICE_AUDIO_BACKEND=MINIAUDIO
+cmake -B build -DCOSYVOICE_AUDIO_BACKEND=FFMPEG
+cmake -B build -DCOSYVOICE_AUDIO_BACKEND=FFMPEG -DFFMPEG_PREBUILT_DIR=/path/to/ffmpeg
 ```
 
 If you build with FFmpeg support, the public audio API keeps the same function names. Use `cosyvoice_audio_supported_encoding_formats()` to query the actual formats available in the linked FFmpeg runtime.
@@ -303,91 +301,51 @@ License reminder:
 
 - The repository code is MIT. FFmpeg prebuilt binaries may be LGPL or GPL depending on build options. Using a GPL-enabled FFmpeg build may impose GPL obligations on your redistributed binaries. See [FFmpeg-NOTICE.md](FFmpeg-NOTICE.md).
 
-## CMake Options
-Project-level options:
-- `BUILD_SHARED_LIBS=ON/OFF` (default: `ON`)
-- `COSYVOICE_NO_AUDIO=ON/OFF` (default: `OFF`)
-- `COSYVOICE_NO_FRONTEND=ON/OFF` (default: `OFF`)
-- `COSYVOICE_NO_ICU=ON/OFF` (default: `OFF`)
-- `COSYVOICE_AUDIO_BACKEND=MINIAUDIO/FFMPEG` (default: `MINIAUDIO`)
-- `COSYVOICE_CLI_NO_PLAYBACK=ON/OFF` (default: unset, follows `COSYVOICE_NO_AUDIO`)
-- `COSYVOICE_SERVER_NO_WEBUI=ON/OFF` (default: `OFF`) — Disable the embedded WebUI in `cosyvoice-server`. When enabled, the server starts in API-only mode. Removes the C23 `#embed` dependency for non-Windows builds.
-- `COSYVOICE_SERVER_DEFAULT_MODE=WEBUI/API` (default: `WEBUI`) — Default server mode when neither `--api` nor `--webui` is given on the command line. Set to `API` for headless deployments.
+## Streaming TTS & DiT KV Cache
 
-Dependency path options:
-- `GGML_SOURCE_DIR=<path>`
-- `ICU_PREBUILT_DIR=<path>`
-- `ORT_PREBUILT_DIR=<path>`
-- `FFMPEG_PREBUILT_DIR=<path>`
-- `SIMDE_INCLUDE_DIR=<path>` (required on ARM64/aarch64, including Android cross-compilation)
+Streaming TTS delivers audio chunks incrementally via a callback function as they are synthesized, without waiting for the full utterance to complete. This enables real-time playback and lower perceived latency.
 
-GGML backend options are passed through from GGML CMake (for example `GGML_CUDA`, `GGML_VULKAN`, etc.).
+The streaming pipeline introduces a **DiT KV cache** to avoid redundant computation. During non-streaming inference, the DiT module runs 10 diffusion steps, each computing self-attention over the full audio sequence — resulting in 10× attention recomputation. The KV cache stores intermediate key/value tensors across steps so that each position is computed only once.
 
-## Build Matrix (Typical)
-| Scenario | Recommended CMake flags |
-|---|---|
-| CUDA backend | `-DGGML_CUDA=ON` |
-| Vulkan backend | `-DGGML_VULKAN=ON` |
-| CPU-only | no backend flag required |
-| Core-only (no frontend / ICU) | `-DCOSYVOICE_NO_FRONTEND=ON -DCOSYVOICE_NO_ICU=ON` |
-| No-audio helper API | `-DCOSYVOICE_NO_AUDIO=ON` |
-| Disable CLI playback | `-DCOSYVOICE_CLI_NO_PLAYBACK=ON` |
+### Slot Organization
 
-## GGML Backend/Build Options
-This project vendors/uses GGML through CMake, so GGML backend switches can be passed from this root build.
+The DiT KV cache is organized into **slots**, where each slot holds the KV cache for one diffusion step. With the default 10 steps, there can be at most 10 slots.
 
-Typical examples (refer to `llama.cpp` / GGML [docs](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md) for backend-specific options and recommended settings):
-```bash
-# CUDA example
-cmake -S . -B build-cuda -DGGML_CUDA=ON
-```
+Slots fall into three categories:
 
-Project options:
-- `COSYVOICE_NO_AUDIO=ON/OFF` (disable/enable audio helper APIs)
-- `COSYVOICE_CLI_NO_PLAYBACK=ON/OFF` (disable/enable CLI playback; if unset, follows `COSYVOICE_NO_AUDIO`)
-- `COSYVOICE_NO_FRONTEND=ON/OFF` (disable/enable ONNX frontend)
-- `COSYVOICE_NO_ICU=ON/OFF` (disable/enable ICU text normalization)
-- `BUILD_SHARED_LIBS=ON/OFF`
+| Category | Memory | Behavior |
+|----------|--------|----------|
+| **Fixed** | Stays on device (GPU) | Fastest; never offloaded |
+| **Offloadable** | Offloaded to CPU when not in use | Saves device memory at the cost of transfer latency |
+| **Uncached** | Not stored at all | Full attention recomputation every step, no extra memory |
 
-Practical combinations:
-```bash
-# Core-only build (no ONNX frontend, no ICU text norm)
-cmake -S . -B build-core -DCMAKE_BUILD_TYPE=Release -DCOSYVOICE_NO_FRONTEND=ON -DCOSYVOICE_NO_ICU=ON
+Total slots = `fixed + offloadable`. Remaining steps (10 − total) use full recomputation.
 
-# No-audio build (CLI output forced to WAV fallback path)
-cmake -S . -B build-noaudio -DCMAKE_BUILD_TYPE=Release -DCOSYVOICE_NO_AUDIO=ON
+The cache is large, so the default is 0 slots (all 10 steps fully recomputed). When enabled and the sequence exceeds the configured cache length, some positions are discarded — inference continues normally but output quality may degrade. Offloadable slots transfer data between device and CPU, which may not improve speed and can be slower than full recomputation depending on bandwidth.
 
-# Disable CLI playback (audio helper APIs still available)
-cmake -S . -B build-noplay -DCMAKE_BUILD_TYPE=Release -DCOSYVOICE_CLI_NO_PLAYBACK=ON
-```
+> The DiT KV cache is **only used during streaming TTS**; non-streaming calls ignore it.
 
-## Using Custom Dependencies
-You can point CMake to custom dependency locations with cache variables:
+### Configuration
 
-```bash
-cmake -S . -B build \
-  -DGGML_SOURCE_DIR=/path/to/ggml \
-  -DICU_PREBUILT_DIR=/path/to/icu \
-  -DORT_PREBUILT_DIR=/path/to/onnxruntime \
-  -DSIMDE_INCLUDE_DIR=/path/to/simde
-```
+DiT KV cache parameters are configured via CLI/server `--dit-kv-*` flags:
 
-You can also use the default prebuilt locations under your build directory:
-- `<build_dir>/_deps/icu`
-- `<build_dir>/_deps/onnxruntime`
+- `--dit-kv-type`: Storage format (f32/f16/q8_0/...) for the DiT KV cache.
+- `--dit-kv-fixed-slots`: Number of device-resident slots.
+- `--dit-kv-offloadable-slots`: Number of CPU-offloadable slots.
+- `--dit-kv-cache-length`: Maximum sequence positions kept in the cache.
 
-If you place files there with the expected layout, CMake will pick them up automatically (without extra `-D` flags).
+Streaming is enabled via `--stream` flag on CLI/server. Chunk granularity is controlled by `--chunk-tokens`.
 
-Expected markers/layout:
-- ICU: `include/unicode/utypes.h` (and platform libs/dlls under `lib*` / `bin*`)
-- ONNX Runtime: `include/onnxruntime_c_api.h` and runtime library files under `lib`
+## Inference Buffer Policies
 
-Notes:
-- If `GGML_SOURCE_DIR` does not contain GGML sources, CMake will try to clone GGML.
-- If ICU/ONNX Runtime are not found by `find_package`, CMake will use/download prebuilt binaries into the configured prebuilt directories.
-- On Windows, prebuilt DLLs are copied next to built executables for local running.
+The inference engine uses a buffer policy that controls how intermediate tensors are allocated:
+
+- `shared`: LLM KV cache shares memory with DiT intermediate buffers. Each inference runs the LLM module fully. Saves memory but can cause instability on CUDA when Flash Attention is disabled.
+- `balanced`: Like `shared`, but offloads reusable LLM KV cache to CPU after LLM inference completes.
+- `dedicated`: Fully independent buffers. LLM KV cache persists on device and can be reused quickly across steps — recommended for streaming.
 
 ## Model Conversion to GGUF
+
 Use this repository's conversion script (`convert_model_to_gguf.py`) to convert upstream CosyVoice model weights to GGUF for `cosyvoice.cpp`.
 
 Install Python dependencies first:
@@ -429,24 +387,16 @@ After conversion:
 1. Verify the generated `.gguf` file.
 2. (Optional) Quantize it with this repository's `quantize` tool.
 
-## Tooling Guide
-This repository includes three user-facing tools:
-- `cosyvoice-cli`: local file-based TTS generation (supports prompt_speech reuse and frontend + TTS flow).
-- `cosyvoice-server`: OpenAI Speech-compatible HTTP API server for service-style integration.
-- `quantize`: GGUF quantization utility to convert model files to smaller/faster formats. Supports per-tensor quantization type mapping via PCRE2 regex patterns (`-M/--tensor-map`). Pre-built profiles for CosyVoice3-2512 are available under `tools/quantize/profiles/`.
-
-Full commands, options, and examples are documented in:
-- [docs/TOOLS.md](docs/TOOLS.md)
-
 ## Backend Test Status
+
 Current backend test results are as follows:
 
 | Backend | Status | Notes |
 |---|---:|---|
-| CPU | Working | Thanks to @[jasagiri](https://github.com/jasagiri) for helping identify the issue. Tested on Windows, Linux, and Mac. |
+| CPU | Working | Tested on Windows, Linux, and Mac. |
 | CUDA | Working | Tested on Ada Lovelace GPUs (Windows & Linux). |
-| Metal | Working | Thanks to @[jasagiri](https://github.com/jasagiri) for his help and code contributions. |
-| SYCL | Working | Verified on the Intel Raptor Lake integrated GPU on Windows 11 x64. |
+| Metal | Working | Thanks to @[jasagiri](https://github.com/jasagiri) for help and code contributions. |
+| SYCL | Working | Verified on Intel Raptor Lake integrated GPU on Windows 11 x64. |
 | Vulkan | Not working | Currently cannot run normally. |
 | OpenCL | Working | Verified on Android 16, Qualcomm Snapdragon 8 Elite. Many ops are missing and fall back to CPU; frequent GPU-CPU context switching overhead results in no significant speedup over CPU. |
 | Others | Untested | |
@@ -456,6 +406,28 @@ Current backend test results are as follows:
 - ICU/ONNX Runtime detection issues: either install system packages (where applicable) or place prebuilt files into `<build_dir>/_deps/icu` and `<build_dir>/_deps/onnxruntime`.
 - Executable starts but misses runtime libraries on Windows: ensure post-build copied DLLs exist next to binaries in `build/bin`.
 - Backend-specific issues are summarized in [Backend Test Status](#backend-test-status).
+
+## Documentation
+- API index: [docs/API.md](docs/API.md)
+- Tooling guide: [docs/TOOLS.md](docs/TOOLS.md)
+- Android build guide: [docs/build-android.md](docs/build-android.md)
+
+## AI Usage Disclosure
+- Most core library code is written by the author.
+- Most tooling (cli, quantize, server) and documentation content is drafted and edited with AI assistance.
+- Small mistakes or implementation drift may still exist; when in doubt, treat source code and header files as the ground truth, and feel free to open an issue or PR.
+
+## Third-Party Notices
+- See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for bundled dependency license details.
+- FFT implementation references/adapts KissFFT (BSD-3-Clause) with project-specific SIMD optimizations; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+- Tokenizer implementation is adapted from llama.cpp (MIT).
+
+## Licensing
+- **Repository code**: MIT (`LICENSE`).
+- **Upstream reference**: the original CosyVoice project code and models are under Apache-2.0.
+- **Implementation note**: this repository is an independent C++/GGML re-implementation based on model architecture and inference behavior, and is not an official fork or release.
+- **GGUF model artifacts**: published model files remain under Apache-2.0. See [Pre-converted Models](#pre-converted-models) for download links.
+- **Model license file**: [MODEL_LICENSE.md](MODEL_LICENSE.md)
 
 ## Contributing
 Contributions are welcome.

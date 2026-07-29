@@ -1100,41 +1100,7 @@ COSYVOICE_API void cosyvoice_set_hift_rand_ini(cosyvoice_context_t ctx, const fl
 
 无返回值。
 
-## cosyvoice_request_stop
 
-### 语法
-
-```c
-COSYVOICE_API void cosyvoice_request_stop(cosyvoice_context_t ctx);
-```
-
-### 说明
-
-请求当前 worker 的当前任务尽快停止。停止是优雅的——worker 会完成当前操作后才响应请求，因此截止点之前的输出仍然有效。
-
-### 参数
-
-- `ctx`：模型上下文。
-
-## cosyvoice_stop_requested
-
-### 语法
-
-```c
-COSYVOICE_API bool cosyvoice_stop_requested(cosyvoice_context_t ctx);
-```
-
-### 说明
-
-检查并原子清除当前 worker 的停止请求标志。内部热路径（`llm_job_ext`、`token2wav_ext`、`tts`）使用此函数检测停止请求。标志被原子重置，后续调用返回 `false`。
-
-### 参数
-
-- `ctx`：模型上下文。
-
-### 返回值
-
-若自上次检查以来有停止请求则返回 `true`，否则返回 `false`。
 
 ## cosyvoice_prompt_speech_get_crc32
 

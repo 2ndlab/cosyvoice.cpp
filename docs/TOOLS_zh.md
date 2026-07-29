@@ -80,6 +80,8 @@ quantize -f model.gguf -o model-q4_k_s.gguf -t Q4_K -M tools/quantize/profiles/c
 ## Server 工具（`tools/server`）
 可执行文件名：`cosyvoice-server`
 
+> 客户端断开连接时，推理会尽快停止。
+
 服务端有**两种运行模式**：
 
 | 模式 | 选择方式 | 说明 |
@@ -643,6 +645,8 @@ python tools/server/batch_tts_stress_test.py \
 
 ## CLI 工具（`tools/cli`）
 可执行文件名：`cosyvoice-cli`
+
+> 推理过程中按 `Ctrl+C` 可中断合成（尽快停止）。
 
 查看帮助：
 ```bash

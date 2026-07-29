@@ -1815,3 +1815,39 @@ Releases reusable inference buffers cached inside the context.
 ### Parameters
 
 - `ctx`: Context handle.
+
+## cosyvoice_request_stop
+
+### Syntax
+
+```c
+COSYVOICE_API void cosyvoice_request_stop(cosyvoice_context_t ctx);
+```
+
+### Description
+
+Requests the current worker's job to stop and waits for cancellation. Cleans up internal context state before returning. Must be called from a separate thread — calling from a stream callback will deadlock.
+
+### Parameters
+
+- `ctx`: Context handle.
+
+## cosyvoice_is_stop_requested
+
+### Syntax
+
+```c
+COSYVOICE_API bool cosyvoice_is_stop_requested(cosyvoice_context_t ctx);
+```
+
+### Description
+
+Checks if a stop was requested for the current worker. Returns immediately. Does NOT clear the stop flag.
+
+### Parameters
+
+- `ctx`: Context handle.
+
+### Returns
+
+`true` if a stop was requested; `false` otherwise.
