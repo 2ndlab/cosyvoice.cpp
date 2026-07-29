@@ -561,9 +561,9 @@ cleanup:
     worker->stop_flag.store(false, std::memory_order_release);
 }
 
-bool cosyvoice_model::stop_requested()
+bool cosyvoice_model::is_stop_requested()
 {
-    return worker->stop_flag.exchange(false, std::memory_order_acq_rel);
+    return worker->stop_flag.load(std::memory_order_acquire);
 }
 
 uint32_t cosyvoice_model::llm_get_kv_cache_len()

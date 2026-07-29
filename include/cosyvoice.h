@@ -786,6 +786,25 @@ COSYVOICE_API void cosyvoice_get_total_memory_usage(cosyvoice_context_t ctx, cos
  */
 COSYVOICE_API void cosyvoice_empty_buffer_cache(cosyvoice_context_t ctx);
 
+// ----------------------------------------------------------------------------
+// Stop-Request API
+// ----------------------------------------------------------------------------
+
+/**
+ * @brief Request the current worker's job to stop and wait for cancellation.
+ *        Cleans up internal context state before returning.
+ * @note Must be called from a separate thread. Calling from a stream callback
+ *       will deadlock.
+ */
+COSYVOICE_API void cosyvoice_request_stop(cosyvoice_context_t ctx);
+
+/**
+ * @brief Check if a stop was requested for the current worker.
+ * @return True if a stop was requested, false otherwise.
+ * @note Returns immediately.
+ */
+COSYVOICE_API bool cosyvoice_is_stop_requested(cosyvoice_context_t ctx);
+
 #ifdef __cplusplus
 }
 #endif

@@ -102,7 +102,7 @@ struct cosyvoice_model : virtual cosyvoice_model_context, virtual cosyvoice_obje
     uint32_t get_worker_no();
     uint32_t get_n_workers();
     void request_stop();
-    bool stop_requested();
+    bool is_stop_requested();
 
     uint32_t llm_get_kv_cache_len();
     bool llm_set_kv_cache_len(uint32_t len);

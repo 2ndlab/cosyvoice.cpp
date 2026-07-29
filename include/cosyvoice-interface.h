@@ -122,7 +122,7 @@ struct cosyvoice_model_context
 
     // Stop-request API
     virtual void request_stop() = 0; ///< Request that the active worker's current job stop as soon as possible.
-    virtual bool stop_requested() = 0; ///< Check and atomically clear the stop-requested flag. Returns true if a stop was requested.
+    virtual bool is_stop_requested() = 0; ///< Check whether a stop was requested. Returns true if a stop was requested.
 };
 
 // ----------------------------------------------------------------------------

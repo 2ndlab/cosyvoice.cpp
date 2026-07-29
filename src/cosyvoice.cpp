@@ -405,7 +405,7 @@ bool cosyvoice_tts(cosyvoice_context_t ctx, const int* text, uint32_t text_len, 
         && ctx->token2wav(ctx->llm_get_accepted_tokens(), ctx->llm_get_n_accepted_tokens(), speed, prompt, result))
     {
         // Check if stop was requested during token2wav
-        if (ctx->stop_requested())
+        if (ctx->is_stop_requested())
         {
             result->data = nullptr;
             result->length = 0;
@@ -413,8 +413,6 @@ bool cosyvoice_tts(cosyvoice_context_t ctx, const int* text, uint32_t text_len, 
         }
         return true;
     }
-    // Clear stop flag if generation failed due to stop request
-    ctx->stop_requested();
     result->data = nullptr;
     result->length = 0;
     return false;
@@ -439,11 +437,12 @@ bool cosyvoice_tts_stream(cosyvoice_context_t ctx, const int* text, uint32_t tex
         bool final = false;
         do
         {
-            if (ctx->stop_requested())
+            if (ctx->is_stop_requested())
                 return false;
 
-            if (!final && !ctx->llm_job_ext(text, text_len, prompt, chunk_tokens + 1, &final))
-                goto cleanup;
+            if (!final)
+                if (!ctx->llm_job_ext(text, text_len, prompt, chunk_tokens + 1, &final))
+                    goto cleanup;
 
             n_tokens = std::min(n_tokens + chunk_tokens, ctx->llm_get_n_accepted_tokens());
 
@@ -457,9 +456,12 @@ bool cosyvoice_tts_stream(cosyvoice_context_t ctx, const int* text, uint32_t tex
         } while (n_tokens != ctx->llm_get_n_accepted_tokens());
 
         return true;
+
+    cleanup:
+        if (ctx->is_stop_requested())
+            return false;
     }
 
-cleanup:
     ctx->request_stop();
     return false;
 }
@@ -499,9 +501,9 @@ void cosyvoice_request_stop(cosyvoice_context_t ctx)
     ctx->request_stop();
 }
 
-bool cosyvoice_stop_requested(cosyvoice_context_t ctx)
+bool cosyvoice_is_stop_requested(cosyvoice_context_t ctx)
 {
-    return ctx->stop_requested();
+    return ctx->is_stop_requested();
 }
 
 void cosyvoice_set_noise_callback(cosyvoice_context_t ctx, cosyvoice_noise_callback_t callback, void* callback_ctx)
