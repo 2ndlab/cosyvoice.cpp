@@ -260,6 +260,7 @@ struct CausalConv1d : CausalConv1dBase
     int d = 1;
 
     int causal_padding() const;
+    int64_t output_length(int64_t input_length, bool finalize) const;
 
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* x) const { return build_cgraph(ctx, x, true); }
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* x, bool finalize) const;

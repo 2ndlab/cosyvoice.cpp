@@ -601,6 +601,12 @@ int CausalConv1d::causal_padding() const
     return causal_padding;
 }
 
+int64_t CausalConv1d::output_length(int64_t input_length, bool finalize) const
+{
+    GGML_ASSERT(finalize || causal_type == right);
+    return input_length + (causal_type == left || finalize ? causal_padding() : 0) - (weight->ne[0] - 1) * d;
+}
+
 ggml_tensor* CausalConv1d::build_cgraph(ggml_context* ctx, ggml_tensor* x, bool finalize) const
 {
     GGML_ASSERT(finalize || causal_type == right);

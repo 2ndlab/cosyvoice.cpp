@@ -436,14 +436,20 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
     } while (false);
 
     dit_sched_config<flow.decoder.diffusion_steps> config(params, cut_len, streaming ? worker->offset : 0, streaming, kv_cache->can_reuse());
+    uint32_t noise_len = static_cast<uint32_t>(ggml_nelements(ditctx.x));
+    uint32_t noise_req = noise_len;
+    int64_t full_len;
     if (streaming)
     {
-        if (finalize)
-            worker->offset = 0;
-        else if (flow.decoder.diffusion_steps == params.dit_kv_fixed_slots + params.dit_kv_offloadable_slots)
-            worker->offset += seq_len;
+        if (flow.decoder.diffusion_steps == params.dit_kv_fixed_slots + params.dit_kv_offloadable_slots)
+        {
+            full_len = worker->offset + seq_len;
+            noise_req = static_cast<uint32_t>(full_len * ditctx.x->ne[0]);
+        }
         else
-            worker->offset = seq_len;
+            full_len = seq_len;
+
+        worker->offset = finalize ? 0 : full_len;
 
         worker->chunk_boundaries.push_back(worker->offset);
 
@@ -451,10 +457,11 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
         if (kv_cache->cur_len + chunk_len >= params.dit_kv_cache_length)
             kv_cache->cur_len = params.dit_kv_cache_length - chunk_len;
     }
+    else
+        full_len = seq_len;
 
-    uint32_t noise_len = static_cast<uint32_t>(ggml_nelements(ditctx.x));
-    float* noise_buffer = shared->noise_callback(COSYVOICE_NOISE_CALLBACK_STAGE_BEFORE_FLOW, noise_len, nullptr, shared->noise_callback_ctx);
-    ggml_backend_tensor_set_async(backend.get(), ditctx.x, noise_buffer, 0, ggml_nbytes(ditctx.x));
+    float* noise_buffer = shared->noise_callback(COSYVOICE_NOISE_CALLBACK_STAGE_BEFORE_FLOW, noise_req, nullptr, shared->noise_callback_ctx);
+    ggml_backend_tensor_set_async(backend.get(), ditctx.x, noise_buffer + noise_req - noise_len, 0, ditctx.x->nb[2]);
 
     // Phase 2: Flow decode steps
     ggml_tensor* t_leaf;
@@ -503,7 +510,7 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
     ggml_backend_tensor_set_async(backend.get(), embedding, prompt->flow_embedding.data, 0, embedding->nb[2]);
 
     worker->status = ggml_backend_sched_graph_compute(sched.get(), gf);
-    shared->noise_callback(COSYVOICE_NOISE_CALLBACK_STAGE_AFTER_FLOW, noise_len, noise_buffer, shared->noise_callback_ctx);
+    shared->noise_callback(COSYVOICE_NOISE_CALLBACK_STAGE_AFTER_FLOW, noise_req, noise_buffer, shared->noise_callback_ctx);
     if (params.inference_buffer_policy != COSYVOICE_INFERENCE_BUFFER_POLICY_DEDICATED)
         llm_set_kv_cache_len(0);
     if (worker->status != GGML_STATUS_SUCCESS)
@@ -657,13 +664,19 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
             node->op = GGML_OP_NONE;
 
     noise_len = static_cast<uint32_t>(ggml_nelements(noise));
-    noise_buffer = shared->noise_callback(COSYVOICE_NOISE_CALLBACK_STAGE_BEFORE_HIFT, noise_len, nullptr, shared->noise_callback_ctx);
-    ggml_backend_tensor_set_async(backend.get(), noise, noise_buffer, 0, noise->nb[2]);
+    noise_req = static_cast<uint32_t>(hift.f0_predictor.condnet_8.output_length(
+        hift.f0_predictor.condnet_6.output_length(
+            hift.f0_predictor.condnet_4.output_length(
+                hift.f0_predictor.condnet_2.output_length(
+                    hift.f0_predictor.condnet_0.output_length(full_len - prompt->prompt_speech_feat.shape[0],
+                        finalize), true), true), true), true) * hift.scale_factor * noise->ne[0]);
+    noise_buffer = shared->noise_callback(COSYVOICE_NOISE_CALLBACK_STAGE_BEFORE_HIFT, noise_req, nullptr, shared->noise_callback_ctx);
+    ggml_backend_tensor_set_async(backend.get(), noise, noise_buffer + noise_req - noise_len, 0, noise->nb[2]);
 
     result->data = reinterpret_cast<float*>(generated_speech->data);
     result->length = static_cast<uint32_t>(generated_speech->ne[0]);
     worker->status = ggml_backend_sched_graph_compute(sched.get(), gf);
-    shared->noise_callback(COSYVOICE_NOISE_CALLBACK_STAGE_AFTER_HIFT, noise_len, noise_buffer, shared->noise_callback_ctx);
+    shared->noise_callback(COSYVOICE_NOISE_CALLBACK_STAGE_AFTER_HIFT, noise_req, noise_buffer, shared->noise_callback_ctx);
 
     return worker->status == GGML_STATUS_SUCCESS;
 }
