@@ -2,10 +2,14 @@
 
 #include "tool_common_cosyvoice.h"
 
-#include <cstdint>
 #include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <functional>
+#include <mutex>
 #include <random>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -14,6 +18,86 @@ enum class server_log_level
     quiet,
     concise,
     verbose
+};
+
+// Persistent thread pool that monitors active requests for client disconnection.
+// A single polling thread checks all registered monitors every 100ms.
+// On disconnect, calls cosyvoice_request_stop(model_ctx).
+struct stop_thread_pool
+{
+    struct monitor_entry
+    {
+        std::function<bool()> checker;
+        cosyvoice_context_t model_ctx;
+        std::atomic<bool> active{false};
+    };
+
+    std::thread worker;
+    std::mutex mtx;
+    std::vector<std::shared_ptr<monitor_entry>> entries;
+    bool stopped = false;
+
+    stop_thread_pool()
+    {
+        worker = std::thread([this] { loop(); });
+    }
+
+    ~stop_thread_pool()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            stopped = true;
+        }
+        if (worker.joinable())
+            worker.join();
+    }
+
+    std::shared_ptr<monitor_entry> register_monitor(
+        std::function<bool()> checker, cosyvoice_context_t model_ctx)
+    {
+        auto entry = std::make_shared<monitor_entry>();
+        entry->checker   = std::move(checker);
+        entry->model_ctx = model_ctx;
+        entry->active.store(true, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            entries.push_back(entry);
+        }
+        return entry;
+    }
+
+    void unregister_monitor(const std::shared_ptr<monitor_entry>& entry)
+    {
+        entry->active.store(false, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(mtx);
+        auto it = std::remove_if(entries.begin(), entries.end(),
+            [&](const auto& e) { return e == entry; });
+        entries.erase(it, entries.end());
+    }
+
+private:
+    void loop()
+    {
+        for (std::vector<std::shared_ptr<monitor_entry>> snapshot;; std::this_thread::sleep_for(std::chrono::milliseconds(100)))
+        {
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                if (stopped)
+                    return;
+                snapshot = entries;
+            }
+
+            for (auto& entry : snapshot)
+            {
+                if (entry->active.load(std::memory_order_acquire)
+                    && entry->checker())
+                {
+                    cosyvoice_request_stop(entry->model_ctx);
+                    entry->active.store(false, std::memory_order_release);
+                }
+            }
+        }
+    }
 };
 
 struct voice_runtime
@@ -36,8 +120,8 @@ struct server_runtime
     uint32_t concurrency = 1;
     cosyvoice_inference_buffer_policy_t inference_buffer_policy = COSYVOICE_INFERENCE_BUFFER_POLICY_BALANCED;
     bool has_llm_kv_cache_override = false;
-    cosyvoice_llm_kv_cache_type_t requested_llm_kv_cache_type = static_cast<cosyvoice_llm_kv_cache_type_t>(0);
-    cosyvoice_llm_kv_cache_type_t actual_llm_kv_cache_type = static_cast<cosyvoice_llm_kv_cache_type_t>(0);
+    cosyvoice_kv_cache_type_t requested_llm_kv_cache_type = static_cast<cosyvoice_kv_cache_type_t>(0);
+    cosyvoice_kv_cache_type_t actual_llm_kv_cache_type = static_cast<cosyvoice_kv_cache_type_t>(0);
 #ifndef COSYVOICE_NO_ICU
     bool text_normalization_enabled = true;
 #endif
@@ -45,6 +129,15 @@ struct server_runtime
     bool fast_split_text_enabled = true;
     bool fade_in_enabled = true;
     server_log_level log_level = server_log_level::concise;
+
+    bool stream = false;
+    bool has_chunk_tokens = false;
+    uint32_t chunk_tokens = 0;
+
+    // Effective DiT KV cache params (populated after model load)
+    uint32_t dit_kv_fixed_slots          = 0;
+    uint32_t dit_kv_offloadable_slots    = 0;
+    uint32_t dit_kv_cache_length         = 0;
 
     // Frontend model paths (ONNX, for feature extraction)
     std::string frontend_model;
@@ -67,7 +160,12 @@ struct server_runtime
     std::vector<std::vector<std::pair<std::string, cosyvoice_tts_context_handle>>> voice_sessions;
 
     std::mt19937 seed_rng;
-    std::atomic_uint32_t thread_slot_counter{0};
+
+    // Concurrency slot management (request-scoped, not thread-local)
+    std::mutex              slot_mutex;
+    std::vector<bool>       slot_in_use;
+
+    stop_thread_pool        stop_pool;  // dedicated thread for stop requests
 };
 
 inline cosyvoice_context_t get_slot_model_context(server_runtime& runtime, uint32_t slot)
@@ -84,12 +182,32 @@ inline cosyvoice_tts_context_t get_slot_voice_session(server_runtime& runtime, u
     return nullptr;
 }
 
+// Acquire a concurrency slot for this request. Returns UINT32_MAX if all
+// slots are in use (caller should return 503 / overloaded).
+inline uint32_t acquire_thread_slot(server_runtime& runtime)
+{
+    std::lock_guard<std::mutex> lock(runtime.slot_mutex);
+    for (uint32_t i = 0; i < runtime.concurrency; ++i)
+        if (!runtime.slot_in_use[i])
+        {
+            runtime.slot_in_use[i] = true;
+            return i;
+        }
+    return UINT32_MAX;
+}
+
+// Release a concurrency slot previously acquired via acquire_thread_slot.
+inline void release_thread_slot(server_runtime& runtime, uint32_t slot)
+{
+    if (slot >= runtime.concurrency)
+        return;
+    std::lock_guard<std::mutex> lock(runtime.slot_mutex);
+    runtime.slot_in_use[slot] = false;
+}
+
 inline uint32_t get_or_assign_thread_slot(server_runtime& runtime)
 {
-    thread_local uint32_t slot = UINT32_MAX;
-    if (slot == UINT32_MAX)
-        slot = runtime.thread_slot_counter.fetch_add(1, std::memory_order_relaxed);
-    return slot;
+    return acquire_thread_slot(runtime);
 }
 
 int cosyvoice_server_backend_run(server_runtime& runtime);
