@@ -348,10 +348,15 @@ void cosyvoice_kv_cache::update_cache(ggml_context* ctx0, ggml_cgraph* gf, ggml_
 ggml_tensor* cosyvoice_kv_cache::attention_forward(ggml_context* ctx0, ggml_tensor* query_states, ggml_tensor* key_states, ggml_tensor* value_states, ggml_tensor* attention_mask) const
 {
     if (fattn)
-        return ggml_flash_attn_ext(ctx0, query_states, key_states, value_states, attention_mask, 1.f / std::sqrt(static_cast<float>(key_states->ne[0])), 0.f, 0.f);
+    {
+        auto attn_output = ggml_flash_attn_ext(ctx0, query_states, key_states, value_states, attention_mask, 1.f / std::sqrt(static_cast<float>(key_states->ne[0])), 0.f, 0.f);
+        ggml_flash_attn_ext_set_prec(attn_output, GGML_PREC_F32);
+        return attn_output;
+    }
     else
     {
         auto attn_scores = ggml_mul_mat(ctx0, key_states, query_states);
+        ggml_mul_mat_set_prec(attn_scores, GGML_PREC_F32);
         auto attn_weights = ggml_soft_max_ext_inplace(ctx0, attn_scores, attention_mask, 1.f / std::sqrt(static_cast<float>(key_states->ne[0])), 0.f);
         auto attn_output = ggml_mul_mat(ctx0, value_states, attn_weights);
         attn_output = ggml_permute(ctx0, attn_output, 0, 2, 1, 3);
