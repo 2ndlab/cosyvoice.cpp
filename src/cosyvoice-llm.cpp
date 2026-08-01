@@ -354,7 +354,7 @@ void cosyvoice_model_3::llm_prepare_probs(bool allow_stop_tokens)
         __m128 vlow = _mm256_castps256_ps128(sum256);
         __m128 vhigh = _mm256_extractf128_ps(sum256, 1);
         __m128 sum128 = _mm_add_ps(vlow, vhigh);
-        for (; i + 4 < vocab_size; ++i)
+        for (; i + 3 < vocab_size; i += 4)
         {
             __m128 prob256 = _mm_loadu_ps(raw_probs + i);
             sum128 = _mm_add_ps(sum128, prob256);
@@ -366,6 +366,8 @@ void cosyvoice_model_3::llm_prepare_probs(bool allow_stop_tokens)
         sums = _mm_add_ss(sums, shuf);
 
         float sum = _mm_cvtss_f32(sums);
+        for (; i < vocab_size; ++i)
+            sum += raw_probs[i];
         sum256 = _mm256_set1_ps(sum);
         for (i = 0; i + 7 < vocab_size; i += 8)
         {
