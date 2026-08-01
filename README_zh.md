@@ -163,7 +163,7 @@ cmake --build build --config Release
 ```
 
 **C++20 模块**
-服务端使用了 C++20 模块接口（封装 nlohmann-json 和 cpp-httplib）。**建议**使用 **Ninja** 生成器（1.11+）配合较新的 C++ 编译器（GCC 14+ / Clang 16+ / AppleClang 16+ / MSVC 14.34+）以获得完整的模块扫描支持：
+服务端使用了 C++20 模块接口（封装 nlohmann/json 和 cpp-httplib）。**建议**使用 **Ninja** 生成器（1.11+）配合较新的 C++ 编译器（GCC 14+ / Clang 16+ / MSVC 14.34+）以获得完整的模块扫描支持：
 - 在 cmake 配置时添加 `-G Ninja`。
 - Windows：Visual Studio 生成器完整支持模块扫描——无需额外参数。
 - 不支持的生成器或旧版编译器：CMake 会自动检测并**回退到预编译头（PCH）**。
@@ -203,6 +203,21 @@ cmake -B build -DGGML_VULKAN=ON
 
 完整后端选项列表及推荐配置请参考 [GGML 文档](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md)。
 
+**Metal 后端（`GGML_METAL`）特殊处理**
+
+`cmake/patches/ggml-metal-pad-beg.patch`（Metal PAD beg-padding 补丁）是针对特定 ggml 快照编写的。若 Metal 开启而 ggml 漂移到最新 master，`git apply` 会因行偏移/内核重写而失败，从而静默禁用 Metal PAD 支持。为保证补丁始终有效，构建系统会对 ggml 固定提交号——但仅在 Metal 构建时生效，其他后端仍像以前一样使用最新 ggml。
+
+- `GGML_METAL` 在 Apple Silicon 上**默认为 ON**（见 ggml 自身 CMakeLists），也可用 `-DGGML_METAL=ON/OFF` 强制指定。
+- **Metal 构建**（Apple Silicon 默认）：GGML 被固定到提交 `af97976c7810cdabb1863172f31c432dab767de7`（可通过 `cmake/Dependencies.cmake` 中的 `GGML_PINNED_COMMIT` 配置）。CMake 会在克隆后自动 checkout 该提交；若已有 `vendor/ggml` 检出偏离固定提交，仅警告而不中断；并幂等应用 `cmake/patches/ggml-metal-pad-beg.patch`（已应用则跳过）。
+- **非 Metal 构建**：行为不变——浅克隆（`--depth=1`）最新 master，不应用任何补丁。
+
+```bash
+# 强制开启/关闭 Metal（Apple Silicon 默认开启）
+cmake -B build -DGGML_METAL=ON
+```
+
+如需升级 Metal 构建使用的 ggml：先更新 `cmake/Dependencies.cmake` 中的 `GGML_PINNED_COMMIT`，并按照该文件中的说明针对新代码树重新生成补丁，再端到端验证 Metal 合成效果。
+
 **依赖路径选项**
 
 | 选项 | 说明 |
@@ -211,7 +226,7 @@ cmake -B build -DGGML_VULKAN=ON
 | `ICU_PREBUILT_DIR=<path>` | ICU 预编译二进制路径（默认 `<build_dir>/_deps/icu`） |
 | `ORT_PREBUILT_DIR=<path>` | ONNX Runtime 预编译二进制路径（默认 `<build_dir>/_deps/onnxruntime`） |
 | `FFMPEG_PREBUILT_DIR=<path>` | FFmpeg 预编译二进制路径 |
-| `SIMDE_INCLUDE_DIR=<path>` | ARM64/aarch64（含 Android 交叉编译）时需要 |
+| `SIMDE_INCLUDE_DIR=<path>` | ARM64/aarch64（含 Android 交叉编译）所需的 SIMDe 头文件目录——见 [SIMDe（SIMD Everywhere）](#simdesimd-everywhere) |
 
 ### 常见构建矩阵
 
@@ -269,6 +284,31 @@ cmake -B build \
 期望的关键目录/文件：
 - ICU：`include/unicode/utypes.h`（以及 `lib*` / `bin*` 下的库和 DLL）
 - ONNX Runtime：`include/onnxruntime_c_api.h`（以及 `lib` 下的运行库文件）
+
+### SIMDe（SIMD Everywhere）
+
+CPU 热路径直接使用 x86 AVX2/FMA 内联函数。[SIMDe](https://github.com/simd-everywhere/simde) 是一个纯头文件库，可将这些 x86 内联函数翻译到其他指令集——在 ARM64/aarch64 上，同一份代码无需修改即可编译为 NEON。
+
+CMake 的处理方式（`CMakeLists.txt`）：
+
+- **x86_64（GCC/Clang）**：SIMD 路径以 `-mavx -mavx2 -mfma` 编译，原生执行。
+- **ARM64/aarch64（含 Android 交叉编译）**：**必须**提供 SIMDe。CMake 会在 `/opt/homebrew/include`、`/usr/local/include`、`/usr/include` 与 `vendor/simde/` 中查找 `simde/x86/avx2.h`，找不到时配置直接报错。
+
+获取 SIMDe：
+
+```bash
+# macOS
+brew install simde
+
+# Debian/Ubuntu（部分发行版可能没有该包）
+apt install libsimde-dev
+
+# 通用方式——克隆并用 SIMDE_INCLUDE_DIR 指向
+git clone --depth=1 https://github.com/simd-everywhere/simde.git
+cmake -B build -DSIMDE_INCLUDE_DIR=/path/to/simde
+```
+
+x86_64 构建不需要 SIMDe。Android 相关细节见 [docs/build-android.md](docs/build-android.md)。
 
 ### 音频后端与 FFmpeg
 

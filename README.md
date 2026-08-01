@@ -163,7 +163,7 @@ cmake --build build --config Release
 ```
 
 **C++20 modules**
-The server uses C++20 module interfaces (for nlohmann-json and cpp-httplib). A **Ninja** generator (1.11+) with a modern C++ compiler (GCC 14+ / Clang 16+ / AppleClang 16+ / MSVC 14.34+) is **recommended** for full module scanning:
+The server uses C++20 module interfaces (for nlohmann-json and cpp-httplib). A **Ninja** generator (1.11+) with a modern C++ compiler (GCC 14+ / Clang 16+ / MSVC 14.34+) is **recommended** for full module scanning:
 - Add `-G Ninja` to your cmake configure command.
 - Windows: the Visual Studio generator fully supports module scanning — no extra flags.
 - Unsupported generators or older compilers: CMake detects the gap and automatically **falls back to precompiled headers (PCH)**.
@@ -203,6 +203,21 @@ cmake -B build -DGGML_VULKAN=ON
 
 Refer to the [GGML documentation](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md) for the full list of backend-specific options and recommended settings.
 
+**Metal backend (`GGML_METAL`) special handling**
+
+The Metal PAD beg-padding patch in `cmake/patches/ggml-metal-pad-beg.patch` is written against a specific ggml snapshot. If ggml is allowed to float to the latest master while Metal is enabled, line drift / kernel rewrites regularly break `git apply`, silently disabling Metal PAD support. To keep the patch valid, the build system pins the ggml commit — but only for Metal builds, so other backends keep using the latest ggml as before.
+
+- `GGML_METAL` defaults to **ON on Apple Silicon** (see ggml's own CMakeLists) and can be forced with `-DGGML_METAL=ON/OFF`.
+- **Metal builds** (default on Apple Silicon): GGML is pinned to commit `af97976c7810cdabb1863172f31c432dab767de7` (configurable via `GGML_PINNED_COMMIT` in `cmake/Dependencies.cmake`). CMake checks out that commit after cloning, warns (without failing) if an existing `vendor/ggml` checkout has drifted, and applies `cmake/patches/ggml-metal-pad-beg.patch` idempotently (skipped if already applied).
+- **Non-Metal builds**: unchanged behavior — the latest ggml master is shallow-cloned (`--depth=1`) and no patch is applied.
+
+```bash
+# Force Metal on/off (default: ON on Apple Silicon)
+cmake -B build -DGGML_METAL=ON
+```
+
+To upgrade ggml for Metal builds, bump `GGML_PINNED_COMMIT` in `cmake/Dependencies.cmake` and regenerate the patch against the new tree (see the instructions in that file), then re-verify Metal synthesis end-to-end.
+
 **Dependency Path Options**
 
 | Option | Description |
@@ -211,7 +226,7 @@ Refer to the [GGML documentation](https://github.com/ggml-org/llama.cpp/blob/mas
 | `ICU_PREBUILT_DIR=<path>` | Path to ICU prebuilt binaries (default: `<build_dir>/_deps/icu`) |
 | `ORT_PREBUILT_DIR=<path>` | Path to ONNX Runtime prebuilt binaries (default: `<build_dir>/_deps/onnxruntime`) |
 | `FFMPEG_PREBUILT_DIR=<path>` | Path to FFmpeg prebuilt binaries |
-| `SIMDE_INCLUDE_DIR=<path>` | Required for ARM64/aarch64 (including Android cross-compilation) |
+| `SIMDE_INCLUDE_DIR=<path>` | SIMDe headers for ARM64/aarch64 (including Android cross-compilation) — see [SIMDe (SIMD Everywhere)](#simde-simd-everywhere) |
 
 ### Build Matrix
 
@@ -269,6 +284,31 @@ If you place files there with the expected layout, CMake will pick them up autom
 Expected markers/layout:
 - ICU: `include/unicode/utypes.h` (and platform libs/dlls under `lib*` / `bin*`)
 - ONNX Runtime: `include/onnxruntime_c_api.h` and runtime library files under `lib`
+
+### SIMDe (SIMD Everywhere)
+
+Hot CPU paths use x86 AVX2/FMA intrinsics directly. [SIMDe](https://github.com/simd-everywhere/simde) is a header-only library that maps these x86 intrinsics to other ISAs — on ARM64/aarch64 the same code compiles to NEON without modification.
+
+How CMake handles it (`CMakeLists.txt`):
+
+- **x86_64 (GCC/Clang)**: the SIMD paths are compiled with `-mavx -mavx2 -mfma` and run natively.
+- **ARM64/aarch64 (incl. Android cross-compilation)**: SIMDe is **required**. CMake looks for `simde/x86/avx2.h` in `/opt/homebrew/include`, `/usr/local/include`, `/usr/include` and `vendor/simde/`, and configuration fails with a clear error if it is not found.
+
+Getting SIMDe:
+
+```bash
+# macOS
+brew install simde
+
+# Debian/Ubuntu (package may not exist on all distros)
+apt install libsimde-dev
+
+# Anywhere — clone and point SIMDE_INCLUDE_DIR at it
+git clone --depth=1 https://github.com/simd-everywhere/simde.git
+cmake -B build -DSIMDE_INCLUDE_DIR=/path/to/simde
+```
+
+x86_64 builds do not need SIMDe. For Android specifics, see [docs/build-android.md](docs/build-android.md).
 
 ### Audio Backend & FFmpeg
 
