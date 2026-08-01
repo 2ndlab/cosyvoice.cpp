@@ -402,9 +402,10 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
             ggml_backend_tensor_alloc(token2wav_buffer.get(), speech_feat,
                 ggml_backend_buffer_get_base(token2wav_buffer.get()));
 
+        auto speech_feat_view = ggml_view_2d(ctx0.get(), speech_feat, speech_feat->ne[0], feat->ne[1], speech_feat->nb[1], speech_feat->nb[1] * cache_length);
+        speech_feat_view->buffer = speech_feat->buffer;
         ggml_backend_tensor_set_async(backend.get(), speech_feat, worker->flow_cache.data(), 0, speech_feat->nb[2] - feat->nb[2]);
-        ggml_backend_tensor_copy_async(backend.get(), backend.get(), feat,
-            ggml_view_2d(ctx0.get(), speech_feat, speech_feat->ne[0], feat->ne[1], speech_feat->nb[1], speech_feat->nb[1] * cache_length));
+        ggml_backend_tensor_copy_async(backend.get(), backend.get(), feat, speech_feat_view);
     }
     else
     {
