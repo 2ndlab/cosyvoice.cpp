@@ -9,7 +9,7 @@ Language: English | [简体中文](README_zh.md)
 
 > Unofficial project notice: this repository is **not** affiliated with, endorsed by, or maintained by the official CosyVoice team. It is a community-maintained C++/GGML port created by an independent developer.
 
-> **Current status notice:** CPU, CUDA, Metal, and SYCL backends are currently working. The Vulkan backend currently fails to execute properly. Please review [Backend Test Status](#backend-test-status) before production use.
+> **Current status notice:** CPU, CUDA, Metal, Vulkan, and SYCL backends are currently working. Please review [Backend Test Status](#backend-test-status) before production use.
 
 C++/GGML port of the Python CosyVoice inference pipeline, currently focused on **CosyVoice3**.
 
@@ -58,7 +58,7 @@ This project provides:
 | **UMA Auto-Detection** | Automatically detects unified memory architecture and adjusts buffer policy for optimal throughput |
 | **Inference Buffer Policies** | `shared` / `balanced` / `dedicated` buffer modes to trade off memory vs. throughput |
 | **Text Splitting & Fade-in** | Smart text splitting for long inputs and configurable output fade-in postprocessing |
-| **Multiple Backends** | CPU, CUDA, Metal, SYCL (see [Backend Test Status](#backend-test-status)) |
+| **Multiple Backends** | CPU, CUDA, Metal, Vulkan, SYCL (see [Backend Test Status](#backend-test-status)) |
 | **Cross-Platform** | Windows (x64), Linux (x86_64), macOS (arm64) — all tested in CI |
 
 ## Quick Start
@@ -437,7 +437,7 @@ Current backend test results are as follows:
 | CUDA | Working | Tested on Ada Lovelace GPUs (Windows & Linux). |
 | Metal | Working | Thanks to @[jasagiri](https://github.com/jasagiri) for help and code contributions. |
 | SYCL | Working | Verified on Intel Raptor Lake integrated GPU on Windows 11 x64. |
-| Vulkan | Not working | Currently cannot run normally. |
+| Vulkan | Working | Tested on NVIDIA Ada Lovelace GPUs and Intel Raptor Lake iGPU. |
 | OpenCL | Working | Verified on Android 16, Qualcomm Snapdragon 8 Elite. Many ops are missing and fall back to CPU; frequent GPU-CPU context switching overhead results in no significant speedup over CPU. |
 | Others | Untested | |
 

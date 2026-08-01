@@ -9,7 +9,7 @@
 
 > 非官方说明：本仓库**与 CosyVoice 官方团队无隶属关系**，也未获得官方背书或维护。本项目是社区开发者发起和维护的 C++/GGML 移植实现。
 
-> **当前状态提示：** 当前 CPU、CUDA、Metal 和 SYCL 后端均可正常运行。Vulkan 后端目前无法正常工作。用于生产前请先阅读[后端测试情况](#后端测试情况)。
+> **当前状态提示：** 当前 CPU、CUDA、Metal、Vulkan 和 SYCL 后端均可正常运行。用于生产前请先阅读[后端测试情况](#后端测试情况)。
 
 本项目将原始 CosyVoice 项目发布的 Python 推理流程迁移到 C++/GGML，目前主要支持 **CosyVoice3**。
 
@@ -58,7 +58,7 @@
 | **UMA 自动检测** | 自动检测统一内存架构并调整 buffer policy，优化吞吐 |
 | **推理 Buffer 策略** | `shared` / `balanced` / `dedicated` 三种模式，权衡内存与吞吐 |
 | **文本拆分与淡入** | 长文本智能拆分与可配置的输出淡入后处理 |
-| **多后端支持** | CPU、CUDA、Metal、SYCL（见[后端测试情况](#后端测试情况)） |
+| **多后端支持** | CPU、CUDA、Metal、Vulkan、SYCL（见[后端测试情况](#后端测试情况)） |
 | **跨平台** | Windows (x64)、Linux (x86_64)、macOS (arm64) — 均在 CI 中测试 |
 
 ## 快速开始
@@ -437,7 +437,7 @@ python convert_model_to_gguf.py \
 | CUDA | 可运行 | 已在 Ada Lovelace GPU (Windows & Linux) 上测试。 |
 | Metal | 可运行 | 感谢 @[jasagiri](https://github.com/jasagiri) 的支持与代码贡献。 |
 | SYCL | 可运行 | 已在 Windows 11 x64 上的 Intel Raptor Lake 集成显卡上验证。 |
-| Vulkan | 不能运行 | 目前无法正常运行。 |
+| Vulkan | 可运行 | 在 NVIDIA Ada Lovelace GPU 与 Intel Raptor Lake 核显上验证通过。 |
 | OpenCL | 可运行 | 在 Android 16、Qualcomm Snapdragon 8 Elite 上验证通过。OpenCL 后端缺失大量算子，需卸载到 CPU 运行，频繁切换计算后端导致上下文开支较大，相比 CPU 并未带来显著提速。 |
 | 其它 | 未测试 | |
 
