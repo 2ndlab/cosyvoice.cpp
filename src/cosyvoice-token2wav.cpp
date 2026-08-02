@@ -366,7 +366,8 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
         {
             auto scale_node = feat->src[1];
             GGML_ASSERT(scale_node->op == GGML_OP_SCALE);
-            auto [t, dt] = flow.decoder.get_t_and_dt(ctx0.get(), step);
+            // Match the rebuild branch, which advances this iteration to step + 1.
+            auto [t, dt] = flow.decoder.get_t_and_dt(ctx0.get(), step + 1);
             reinterpret_cast<float*>(t_leaf->op_params)[op_caps.fill ? 0 : 1] = t;
             reinterpret_cast<float*>(scale_node->op_params)[0] = dt;
 
