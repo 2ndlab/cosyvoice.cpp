@@ -27,7 +27,7 @@ jobs:
             arch: arm64
     steps:
       - name: Build (using composite action)
-        uses: ./.github/actions/build
+        uses: ./.github/actions/builds
         with:
           os: ${{ matrix.os }}
           os_name: ${{ matrix.os_name }}
