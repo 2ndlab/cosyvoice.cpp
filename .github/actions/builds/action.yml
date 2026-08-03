@@ -1,0 +1,309 @@
+name: 'Build All Configurations'
+description: 'Builds CosyVoice with various frontend/audio/ICU combinations across platforms'
+
+inputs:
+  os:
+    description: 'Operating system label (e.g., windows-2025-vs2026)'
+    required: true
+  os_name:
+    description: 'Short OS name (windows, linux, macos)'
+    required: true
+  arch:
+    description: 'Architecture (x64, x86_64, arm64)'
+    required: true
+  create_release:
+    description: 'Whether to upload artifacts to a release draft'
+    required: false
+    default: 'false'
+  release_tag:
+    description: 'Release tag name (required if create_release is true)'
+    required: false
+    default: ''
+
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Get Short SHA
+      shell: bash
+      run: echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
+
+    - name: Install Dependencies (Ubuntu)
+      if: inputs.os == 'ubuntu-26.04'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config libicu-dev libavcodec-dev libavformat-dev libavutil-dev libswresample-dev
+
+    - name: Install Dependencies (macOS)
+      if: inputs.os == 'macos-26'
+      shell: bash
+      run: |
+        brew update
+        brew install pkg-config icu4c simde ffmpeg
+
+    - name: Setup MSVC Environment
+      if: inputs.os == 'windows-2025-vs2026'
+      uses: ilammy/msvc-dev-cmd@v1
+
+    - name: Build and Package (Windows)
+      if: inputs.os == 'windows-2025-vs2026'
+      shell: pwsh
+      run: |
+        $frontends = @("ON", "OFF")
+        $audios = @("NONE", "MINIAUDIO", "FFMPEG")
+        $icus = @("ON", "OFF")
+        
+        $cores = $env:NUMBER_OF_PROCESSORS
+        if ([string]::IsNullOrWhiteSpace($cores)) { $cores = 4 }
+        
+        $buildDir = "build"
+        $installDir = "install_dir"
+        $sharedDeps = "$PWD\shared_deps"
+
+        foreach ($f in $frontends) {
+          foreach ($a in $audios) {
+            foreach ($i in $icus) {
+              $combo = "frontend-${f}-audio-${a}-icu-${i}"
+              Write-Host "========================================="
+              Write-Host "Building $combo (Cores: $cores)"
+              Write-Host "========================================="
+              
+              $distDir = "dist_$combo"
+              
+              $fStr = if ($f -eq "OFF") { "-no_frontend" } else { "" }
+              $aStr = if ($a -eq "NONE") { "-no_audio" } else { "-$($a.ToLower())" }
+              $iStr = if ($i -eq "OFF") { "-no_icu" } else { "" }
+              $artifactName = "cosyvoice-${{ env.SHORT_SHA }}-${{ inputs.os_name }}-${{ inputs.arch }}$fStr$aStr$iStr"
+              
+              $cmakeArgs = @(
+                "-B", $buildDir,
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DICU_PREBUILT_DIR=$sharedDeps\icu",
+                "-DORT_PREBUILT_DIR=$sharedDeps\onnxruntime",
+                "-DFFMPEG_PREBUILT_DIR=$sharedDeps\ffmpeg",
+                "-G", "Ninja",
+                "-DCMAKE_C_COMPILER=cl",
+                "-DCMAKE_CXX_COMPILER=cl"
+              )
+              
+              if ($f -eq "OFF") { $cmakeArgs += "-DCOSYVOICE_NO_FRONTEND=ON" } else { $cmakeArgs += "-DCOSYVOICE_NO_FRONTEND=OFF" }
+              if ($i -eq "OFF") { $cmakeArgs += "-DCOSYVOICE_NO_ICU=ON" } else { $cmakeArgs += "-DCOSYVOICE_NO_ICU=OFF" }
+              if ($a -eq "NONE") { 
+                $cmakeArgs += "-DCOSYVOICE_NO_AUDIO=ON" 
+              } else { 
+                $cmakeArgs += "-DCOSYVOICE_NO_AUDIO=OFF"
+                $cmakeArgs += "-DCOSYVOICE_AUDIO_BACKEND=$a" 
+              }
+              
+              & cmake @cmakeArgs
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              
+              & cmake --build $buildDir --config Release -j $cores
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              
+              if (Test-Path $distDir) { Remove-Item -Recurse -Force $distDir }
+              New-Item -ItemType Directory -Path $distDir | Out-Null
+              
+              $binDir = if (Test-Path "$buildDir\bin\Release") { "$buildDir\bin\Release" } else { "$buildDir\bin" }
+              $libDir = if (Test-Path "$buildDir\lib\Release") { "$buildDir\lib\Release" } else { "$buildDir\lib" }
+              
+              Copy-Item "$binDir\*" "$distDir\" -Recurse -ErrorAction SilentlyContinue
+              Copy-Item "$libDir\*" "$distDir\" -Recurse -ErrorAction SilentlyContinue
+              
+              # Copy ONNX Runtime if frontend is ON
+              if ($f -eq "ON") {
+                Copy-Item "$sharedDeps\onnxruntime\lib\onnxruntime*.dll" "$distDir\" -ErrorAction SilentlyContinue
+              }
+              
+              # Exclude specific files completely
+              Remove-Item -Path "$distDir\*.a" -ErrorAction SilentlyContinue
+              Remove-Item -Path "$distDir\*.lib" -ErrorAction SilentlyContinue
+              Remove-Item -Path "$distDir\*.exp" -ErrorAction SilentlyContinue
+              Remove-Item -Path "$distDir\*.pdb" -ErrorAction SilentlyContinue
+              Remove-Item -Path "$distDir\*ggml*" -ErrorAction SilentlyContinue
+              Remove-Item -Path "$distDir\*icu*" -ErrorAction SilentlyContinue
+              Remove-Item -Path "$distDir\av*.dll" -ErrorAction SilentlyContinue
+              Remove-Item -Path "$distDir\sw*.dll" -ErrorAction SilentlyContinue
+              Remove-Item -Path "$distDir\pcre2-config*" -ErrorAction SilentlyContinue
+              
+              Compress-Archive -Path "$distDir\*" -DestinationPath "${artifactName}.zip" -Force
+            }
+          }
+        }
+
+    - name: Build and Package (Unix)
+      if: inputs.os != 'windows-2025-vs2026'
+      shell: bash
+      run: |
+        set -e
+        FRONTENDS=("ON" "OFF")
+        AUDIOS=("NONE" "MINIAUDIO" "FFMPEG")
+        ICUS=("ON" "OFF")
+        
+        CORES=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+        
+        BUILD_DIR="build"
+        INSTALL_DIR="install_dir"
+        SHARED_DEPS="$PWD/shared_deps"
+
+        mkdir -p "${SHARED_DEPS}/onnxruntime"
+
+        if [ "${{ inputs.os }}" == "macos-26" ]; then
+          export CXX="$(brew --prefix llvm@20)/bin/clang++"
+          SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          export PKG_CONFIG_PATH="$(brew --prefix icu4c)/lib/pkgconfig:$PKG_CONFIG_PATH"
+          ICU_ROOT_PATH="$(brew --prefix icu4c)"
+        fi
+        
+        for f in "${FRONTENDS[@]}"; do
+          for a in "${AUDIOS[@]}"; do
+            for i in "${ICUS[@]}"; do
+              COMBO="frontend-${f}-audio-${a}-icu-${i}"
+              echo "========================================="
+              echo "Building $COMBO (Cores: $CORES)"
+              echo "========================================="
+              
+              DIST_DIR="dist_${COMBO}"
+              
+              if [ "$f" == "OFF" ]; then fStr="-no_frontend"; else fStr=""; fi
+              if [ "$a" == "NONE" ]; then aStr="-no_audio"; else aStr="-$(echo $a | tr '[:upper:]' '[:lower:]')"; fi
+              if [ "$i" == "OFF" ]; then iStr="-no_icu"; else iStr=""; fi
+              ARTIFACT_NAME="cosyvoice-${SHORT_SHA}-${{ inputs.os_name }}-${{ inputs.arch }}${fStr}${aStr}${iStr}"
+              
+              CMAKE_ARGS=(
+                "-B" "$BUILD_DIR"
+                "-DCMAKE_BUILD_TYPE=Release"
+                "-DCMAKE_C_COMPILER=clang"
+                "-DCMAKE_CXX_COMPILER=${CXX:-clang++}"
+                "-DGGML_ACCELERATE=OFF"
+                "-DGGML_BLAS=OFF"
+                "-G" "Ninja"
+                "-DORT_PREBUILT_DIR=${SHARED_DEPS}/onnxruntime"
+              )
+              
+              if [ -n "$SDKROOT" ]; then CMAKE_ARGS+=("-DCMAKE_OSX_SYSROOT=${SDKROOT}"); fi
+              if [ -n "$ICU_ROOT_PATH" ]; then CMAKE_ARGS+=("-DICU_ROOT=$ICU_ROOT_PATH"); fi
+              
+              if [ "$f" == "OFF" ]; then CMAKE_ARGS+=("-DCOSYVOICE_NO_FRONTEND=ON"); else CMAKE_ARGS+=("-DCOSYVOICE_NO_FRONTEND=OFF"); fi
+              if [ "$i" == "OFF" ]; then CMAKE_ARGS+=("-DCOSYVOICE_NO_ICU=ON"); else CMAKE_ARGS+=("-DCOSYVOICE_NO_ICU=OFF"); fi
+              if [ "$a" == "NONE" ]; then 
+                CMAKE_ARGS+=("-DCOSYVOICE_NO_AUDIO=ON")
+              else 
+                CMAKE_ARGS+=("-DCOSYVOICE_NO_AUDIO=OFF" "-DCOSYVOICE_AUDIO_BACKEND=$a")
+              fi
+              
+              cmake "${CMAKE_ARGS[@]}"
+              cmake --build "$BUILD_DIR" --config Release -j "$CORES"
+              
+              rm -rf "$DIST_DIR"
+              mkdir -p "$DIST_DIR"
+              
+              if [ -d "$BUILD_DIR/bin/Release" ]; then BIN_DIR="$BUILD_DIR/bin/Release"; else BIN_DIR="$BUILD_DIR/bin"; fi
+              if [ -d "$BUILD_DIR/lib/Release" ]; then LIB_DIR="$BUILD_DIR/lib/Release"; else LIB_DIR="$BUILD_DIR/lib"; fi
+              
+              cp -r "$BIN_DIR"/* "$DIST_DIR"/ 2>/dev/null || true
+              cp -r "$LIB_DIR"/* "$DIST_DIR"/ 2>/dev/null || true
+              
+              # Manually ensure ONNX Runtime is copied if Frontend is ON
+              if [ "$f" == "ON" ]; then
+                rm -f "$DIST_DIR"/libonnxruntime*
+                cp -a "$SHARED_DEPS"/onnxruntime/lib/libonnxruntime*.so* "$DIST_DIR"/ 2>/dev/null || true
+                cp -a "$SHARED_DEPS"/onnxruntime/lib/libonnxruntime*.dylib* "$DIST_DIR"/ 2>/dev/null || true
+              fi
+              
+              # Clean up specific files
+              find "$DIST_DIR" -name "*.a" -delete 2>/dev/null || true
+              find "$DIST_DIR" -name "*.lib" -delete 2>/dev/null || true
+              find "$DIST_DIR" -name "*.exp" -delete 2>/dev/null || true
+              find "$DIST_DIR" -name "*.pdb" -delete 2>/dev/null || true
+              find "$DIST_DIR" -name "*ggml*" -delete 2>/dev/null || true
+              find "$DIST_DIR" -name "*icu*" -delete 2>/dev/null || true
+              find "$DIST_DIR" -name "*avcodec*" -delete 2>/dev/null || true
+              find "$DIST_DIR" -name "*avformat*" -delete 2>/dev/null || true
+              find "$DIST_DIR" -name "*avutil*" -delete 2>/dev/null || true
+              find "$DIST_DIR" -name "*swresample*" -delete 2>/dev/null || true
+              
+              tar -czf "${ARTIFACT_NAME}.tgz" -C "$DIST_DIR" .
+              
+            done
+          done
+        done
+
+    # ---------- Upload Artifacts ----------
+    - name: Upload [ON, NONE, ON]
+      uses: actions/upload-artifact@v4
+      with:
+        name: cosyvoice-${{ env.SHORT_SHA }}-${{ inputs.os_name }}-${{ inputs.arch }}-no_audio
+        path: dist_frontend-ON-audio-NONE-icu-ON/
+    - name: Upload [ON, NONE, OFF]
+      uses: actions/upload-artifact@v4
+      with:
+        name: cosyvoice-${{ env.SHORT_SHA }}-${{ inputs.os_name }}-${{ inputs.arch }}-no_audio-no_icu
+        path: dist_frontend-ON-audio-NONE-icu-OFF/
+    - name: Upload [ON, MINIAUDIO, ON]
+      uses: actions/upload-artifact@v4
+      with:
+        name: cosyvoice-${{ env.SHORT_SHA }}-${{ inputs.os_name }}-${{ inputs.arch }}-miniaudio
+        path: dist_frontend-ON-audio-MINIAUDIO-icu-ON/
+    - name: Upload [ON, MINIAUDIO, OFF]
+      uses: actions/upload-artifact@v4
+      with:
+        name: cosyvoice-${{ env.SHORT_SHA }}-${{ inputs.os_name }}-${{ inputs.arch }}-miniaudio-no_icu
+        path: dist_frontend-ON-audio-MINIAUDIO-icu-OFF/
+    - name: Upload [ON, FFMPEG, ON]
+      uses: actions/upload-artifact@v4
+      with:
+        name: cosyvoice-${{ env.SHORT_SHA }}-${{ inputs.os_name }}-${{ inputs.arch }}-ffmpeg
+        path: dist_frontend-ON-audio-FFMPEG-icu-ON/
+    - name: Upload [ON, FFMPEG, OFF]
+      uses: actions/upload-artifact@v4
+      with:
+        name: cosyvoice-${{ env.SHORT_SHA }}-${{ inputs.os_name }}-${{ inputs.arch }}-ffmpeg-no_icu
+        path: dist_frontend-ON-audio-FFMPEG-icu-OFF/
+        
+    - name: Upload [OFF, NONE, ON]
+      uses: actions/upload-artifact@v4
+      with:
+        name: cosyvoice-${{ env.SHORT_SHA }}-${{ inputs.os_name }}-${{ inputs.arch }}-no_frontend-no_audio
+        path: dist_frontend-OFF-audio-NONE-icu-ON/
+    - name: Upload [OFF, NONE, OFF]
+      uses: actions/upload-artifact@v4
+      with:
+        name: cosyvoice-${{ env.SHORT_SHA }}-${{ inputs.os_name }}-${{ inputs.arch }}-no_frontend-no_audio-no_icu
+        path: dist_frontend-OFF-audio-NONE-icu-OFF/
+    - name: Upload [OFF, MINIAUDIO, ON]
+      uses: actions/upload-artifact@v4
+      with:
+        name: cosyvoice-${{ env.SHORT_SHA }}-${{ inputs.os_name }}-${{ inputs.arch }}-no_frontend-miniaudio
+        path: dist_frontend-OFF-audio-MINIAUDIO-icu-ON/
+    - name: Upload [OFF, MINIAUDIO, OFF]
+      uses: actions/upload-artifact@v4
+      with:
+        name: cosyvoice-${{ env.SHORT_SHA }}-${{ inputs.os_name }}-${{ inputs.arch }}-no_frontend-miniaudio-no_icu
+        path: dist_frontend-OFF-audio-MINIAUDIO-icu-OFF/
+    - name: Upload [OFF, FFMPEG, ON]
+      uses: actions/upload-artifact@v4
+      with:
+        name: cosyvoice-${{ env.SHORT_SHA }}-${{ inputs.os_name }}-${{ inputs.arch }}-no_frontend-ffmpeg
+        path: dist_frontend-OFF-audio-FFMPEG-icu-ON/
+    - name: Upload [OFF, FFMPEG, OFF]
+      uses: actions/upload-artifact@v4
+      with:
+        name: cosyvoice-${{ env.SHORT_SHA }}-${{ inputs.os_name }}-${{ inputs.arch }}-no_frontend-ffmpeg-no_icu
+        path: dist_frontend-OFF-audio-FFMPEG-icu-OFF/
+
+    # ---------- Release Upload (Conditional) ----------
+    - name: Upload to Release
+      if: inputs.create_release == 'true'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ inputs.release_tag }}
+        files: |
+          *.zip
+          *.tgz
+        draft: true
