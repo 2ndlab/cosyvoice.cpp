@@ -27,6 +27,7 @@ jobs:
             os_name: macos
             arch: arm64
     steps:
+      - uses: actions/checkout@v6
       - name: Build (using composite action)
         uses: ./.github/actions/builds
         with:
