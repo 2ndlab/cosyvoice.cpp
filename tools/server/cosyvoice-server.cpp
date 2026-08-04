@@ -249,7 +249,7 @@ static std::string derive_served_model_name(const std::string& model_path)
 
 static bool init_model_context(const server_options& options, ggml_backend_t backend, server_runtime* runtime)
 {
-    cosyvoice_context_params_v3_cpp context_params;
+    cosyvoice_context_params_v3_cpp context_params{ .dit_allow_kv_cache_fallback = true };
     cosyvoice_init_default_context_params(&context_params);
     context_params.inference_buffer_policy = options.inference_buffer_policy;
     context_params.n_max_seq = options.max_llm_len;
