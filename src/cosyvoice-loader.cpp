@@ -957,10 +957,12 @@ void cosyvoice_model_3::load(gguf_loader& loader)
         cv3_shared->llm.layers[0].self_attn.q_proj, cv3_shared->llm.layers[0].self_attn.k_proj, cv3_shared->llm.layers[0].self_attn.v_proj,
         shared->params.llm_allow_kv_cache_fallback, reinterpret_cast<kv_cache_type_union&>(shared->params.llm_kv_cache_type));
 
-    auto [dit_k_type, dit_v_type] = cosyvoice_check_kv_cache_types(worker->ctx0.get(), worker->backend.get(),
-        shared->params.flow_use_flash_attn, cv3_shared->flow.decoder.estimator.transformer_blocks[0].attn.heads, cv3_shared->flow.decoder.estimator.transformer_blocks[0].attn.heads,
-        cv3_shared->flow.decoder.estimator.transformer_blocks[0].attn.to_q, cv3_shared->flow.decoder.estimator.transformer_blocks[0].attn.to_k, cv3_shared->flow.decoder.estimator.transformer_blocks[0].attn.to_v,
-        shared->params.dit_allow_kv_cache_fallback, reinterpret_cast<kv_cache_type_union&>(shared->params.dit_kv_cache_type));
+    auto [dit_k_type, dit_v_type] = shared->params.dit_kv_fixed_slots != 0 ?
+        cosyvoice_check_kv_cache_types(worker->ctx0.get(), worker->backend.get(),
+            shared->params.flow_use_flash_attn, cv3_shared->flow.decoder.estimator.transformer_blocks[0].attn.heads, cv3_shared->flow.decoder.estimator.transformer_blocks[0].attn.heads,
+            cv3_shared->flow.decoder.estimator.transformer_blocks[0].attn.to_q, cv3_shared->flow.decoder.estimator.transformer_blocks[0].attn.to_k, cv3_shared->flow.decoder.estimator.transformer_blocks[0].attn.to_v,
+            shared->params.dit_allow_kv_cache_fallback, reinterpret_cast<kv_cache_type_union&>(shared->params.dit_kv_cache_type))
+        : std::tuple<ggml_type, ggml_type>();
 
     for (auto& worker : std::span(workers, shared->params.n_workers))
     {
