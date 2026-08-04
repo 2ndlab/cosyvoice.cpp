@@ -306,6 +306,7 @@ typedef struct cosyvoice_context_params_v3
 struct cosyvoice_context_params_v2_cpp : cosyvoice_context_params_t
 {
     uint32_t n_workers; ///< Number of workers to use for inference.
+    uint32_t reserved_tail_padding;
 };
 
 struct cosyvoice_context_params_v3_cpp : cosyvoice_context_params_v2_cpp
@@ -334,6 +335,7 @@ struct cosyvoice_context_params_v3_cpp : cosyvoice_context_params_v2_cpp
     uint32_t dit_kv_fixed_slots;          ///< Number of fixed (non-offloadable) DiT KV slots.
     uint32_t dit_kv_offloadable_slots;    ///< Number of offloadable DiT KV slots.
     uint32_t dit_kv_cache_length;          ///< Maximum sequence length for the DiT KV cache. 0 to use default (n_max_seq * 10).
+    uint32_t reserved_tail_padding;
 };
 #endif
 
