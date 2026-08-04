@@ -546,8 +546,8 @@ static std::tuple<ggml_type, ggml_type> cosyvoice_check_kv_cache_types(
             auto q = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, q_proj.weight->ne[1] / num_attn_heads, 1, num_attn_heads);
             auto k = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k_proj.weight->ne[1] / num_kv_heads, 1, num_kv_heads);
             auto v = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, v_proj.weight->ne[1] / num_kv_heads, 1, num_kv_heads);
-            auto cached_k = ggml_new_tensor(ctx, GGML_TYPE_F32, GGML_MAX_DIMS, k->ne);
-            auto cached_v = ggml_new_tensor(ctx, GGML_TYPE_F32, GGML_MAX_DIMS, v->ne);
+            auto cached_k = ggml_new_tensor(ctx, check_k, GGML_MAX_DIMS, k->ne);
+            auto cached_v = ggml_new_tensor(ctx, check_v, GGML_MAX_DIMS, v->ne);
 
             cached_k = ggml_set_rows(ctx, cached_k, k, position_ids);
             cached_v = ggml_set_rows(ctx, cached_v, v, position_ids);
