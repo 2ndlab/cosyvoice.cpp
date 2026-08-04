@@ -228,7 +228,7 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
         }
     } while (false);
 
-    dit_sched_config<flow.decoder.diffusion_steps> config(params, cut_len, streaming ? worker->offset : 0, streaming, kv_cache->can_reuse());
+    dit_sched_config<CausalConditionalCFM::diffusion_steps> config(params, cut_len, streaming ? worker->offset : 0, streaming, kv_cache->can_reuse());
     uint32_t noise_len = static_cast<uint32_t>(ggml_nelements(ditctx.x));
     uint32_t noise_req = noise_len;
     int64_t full_len;

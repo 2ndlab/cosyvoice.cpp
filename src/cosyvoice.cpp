@@ -430,13 +430,13 @@ bool cosyvoice_tts_stream(cosyvoice_context_t ctx, const int* text, uint32_t tex
     {
         use_count_guard guard(ctx);
 
-        const auto chunk_tokens = ctx->get_chunk_tokens();
-
         ctx->llm_clear_accepted_tokens();
         uint32_t n_tokens = 0;
         bool final = false;
         do
         {
+            const auto chunk_tokens = ctx->get_chunk_tokens();
+
             if (ctx->is_stop_requested())
                 return false;
 
