@@ -390,7 +390,7 @@ bool cosyvoice_kv_cache::bind_slot(int slot_idx)
 
 void cosyvoice_kv_cache::slide_kv_slot()
 {
-    GGML_ASSERT(cur_slot_idx < n_slots);
+    GGML_ASSERT(cur_slot_idx + 1 < n_slots);
     if (fattn)
     {
         auto layer_idx = cur_slot_idx++ * layers;
