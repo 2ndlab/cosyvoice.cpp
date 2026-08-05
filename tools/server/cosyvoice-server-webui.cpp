@@ -1168,7 +1168,7 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
         }
 
         // Build context params with defaults
-        cosyvoice_context_params_v3_cpp context_params;
+        cosyvoice_context_params_v3_cpp context_params{ .dit_allow_kv_cache_fallback = true };
         cosyvoice_init_default_context_params(&context_params);
 
         if (runtime.has_seed)

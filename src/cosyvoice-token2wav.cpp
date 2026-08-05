@@ -260,7 +260,8 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
     ggml_tensor* t_leaf;
     ggml_tensor* position_ids;
     ggml_tensor* attn_mask;
-    if (config[0].cache_kv) kv_cache->bind_slot(0);
+    if (config[flow.decoder.diffusion_steps - 1].cache_kv)
+        kv_cache->bind_slot(0);
     auto feat = flow.decoder.build_cgraph_one_step(ctx0.get(), ditctx, 1, op_caps, config[0].cut_len, t_leaf, position_ids, gf, config[0].cache_kv ? kv_cache : nullptr, config[0].mask ? &attn_mask : nullptr);
     ggml_build_forward_expand(gf, feat);
     set_graph_backends(gf, sched.get(), backend.get(), cpu_backend.get(), op_caps);

@@ -115,7 +115,7 @@ elseif(COSYVOICE_AUDIO_BACKEND STREQUAL "FFMPEG")
 endif()
 
 if(COSYVOICE_NO_FRONTEND)
-    set_property(SOURCE cosyvoice-server-webui.cpp cosyvoice-server.cpp APPEND PROPERTY COMPILE_DEFINITIONS "COSYVOICE_NO_FRONTEND")
+    set_property(SOURCE cosyvoice-server-webui.cpp cosyvoice-server.cpp cosyvoice-server-backend.cpp server_common.cpp APPEND PROPERTY COMPILE_DEFINITIONS "COSYVOICE_NO_FRONTEND")
 endif()
 if(COSYVOICE_NO_ICU)
     set_property(SOURCE cosyvoice-server.cpp cosyvoice-server-webui.cpp APPEND PROPERTY COMPILE_DEFINITIONS "COSYVOICE_NO_ICU")

@@ -81,6 +81,7 @@ cosyvoice_model::cosyvoice_model(ggml_backend_t backend, const cosyvoice_context
 
     auto init_worker = [&](cosyvoice_worker_context* cur)
     {
+        memset(cur, 0, sizeof(cosyvoice_worker_context));
         worker = new (cur) cosyvoice_worker_context(backend);
         if (!dev_is_cpu)
         {
