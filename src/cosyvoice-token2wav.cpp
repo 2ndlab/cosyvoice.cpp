@@ -294,6 +294,9 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
                     row[j] = j < block_end ? 0 : 0xFC00;
             }
         }
+
+        if (config[step].cache_kv)
+            kv_cache->set_input_v_idxs(backend.get(), reinterpret_cast<const int32_t*>(position_ids->data), static_cast<uint32_t>(position_ids->ne[0] * position_ids->ne[1]), static_cast<uint32_t>(position_ids->ne[0]));
     };
 
     post_process(0);
@@ -341,7 +344,8 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
             memcpy(ditctx.x->ne, feat->ne, sizeof(ditctx.x->ne));
             memcpy(ditctx.x->nb, feat->nb, sizeof(ditctx.x->nb));
         }
-        ggml_backend_tensor_copy_async(backend.get(), backend.get(), feat, ditctx.x);
+        if (!config[step - 1].offload)
+            ggml_backend_tensor_copy_async(backend.get(), backend.get(), feat, ditctx.x);
 
         if (config[step].rebuild)
         {
@@ -382,6 +386,9 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
 
         if (config[step].offload)
         {
+            memcpy(ditctx.x->ne, feat->ne, sizeof(ditctx.x->ne));
+            memcpy(ditctx.x->nb, feat->nb, sizeof(ditctx.x->nb));
+            ggml_backend_tensor_copy_async(backend.get(), backend.get(), feat, ditctx.x);
             if (step != flow.decoder.diffusion_steps - 1 && config[step + 1].rebuild)
                 ggml_backend_sched_reset(sched.get());
             kv_cache->offload_slot(backend.get(), sched.get(), offload_slot++, kv_cache->cur_len + static_cast<uint32_t>(position_ids->ne[0]));
