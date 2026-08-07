@@ -434,18 +434,30 @@ void cosyvoice_kv_cache::slide_kv_slot()
             auto k = next_layer.k;
             auto k_view = layer.k_view;
             next_layer.k_view = k_view;
+            // permute node
             k_view->data = k->data;
             k_view->view_src = k;
             k_view = k_view->src[0];
+            // view node
+            k_view->data = k->data;
+            k_view->view_src = k;
+            k_view = k_view->src[0];
+            // set_rows (writer) node
             k_view->data = k->data;
             k_view->src[2] = k_view->view_src = k;
 
             auto v = next_layer.v;
             auto v_view = layer.v_view;
             next_layer.v_view = v_view;
+            // permute node
             v_view->data = v->data;
             v_view->view_src = v;
             v_view = v_view->src[0];
+            // view node
+            v_view->data = v->data;
+            v_view->view_src = v;
+            v_view = v_view->src[0];
+            // set_rows (writer) node
             v_view->data = v->data;
             v_view->src[2] = v_view->view_src = v;
         }
