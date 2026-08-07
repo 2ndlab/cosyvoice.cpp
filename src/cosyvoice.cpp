@@ -162,12 +162,6 @@ cosyvoice_context_t cosyvoice_load_ext(const void* data, size_t size, const cosy
     if (version >= COSYVOICE_CONTEXT_PARAMS_V3_VERSION)
     {
         auto* p_v3 = reinterpret_cast<const cosyvoice_context_params_v3_t*>(params);
-        if (params_v3.dit_kv_fixed_slots == 0 && params_v3.dit_kv_offloadable_slots != 0)
-        {
-            params_v3.dit_kv_fixed_slots = 1;
-            --params_v3.dit_kv_offloadable_slots;
-        }
-
         params_v3.dit_kv_cache_type = p_v3->dit_kv_cache_type;
         params_v3.dit_kv_fixed_slots = p_v3->dit_kv_fixed_slots;
         params_v3.dit_kv_offloadable_slots = p_v3->dit_kv_offloadable_slots;
@@ -175,6 +169,14 @@ cosyvoice_context_t cosyvoice_load_ext(const void* data, size_t size, const cosy
         params_v3.dit_kv_cache_length = p_v3->dit_kv_cache_length;
         if (params_v3.dit_kv_cache_length == 0)
             params_v3.dit_kv_cache_length = params->n_max_seq * 10;
+
+        // A single offloadable slot buys one CPU round-trip per chunk plus a dedicated
+        // scratch slot; converting it to a fixed slot is strictly cheaper and simpler.
+        if (params_v3.dit_kv_offloadable_slots == 1)
+        {
+            params_v3.dit_kv_offloadable_slots = 0;
+            ++params_v3.dit_kv_fixed_slots;
+        }
     }
     else
     {

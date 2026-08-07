@@ -1008,7 +1008,7 @@ void cosyvoice_model_3::load(gguf_loader& loader)
             shared->params.llm_use_flash_attn
         );
 
-        if (shared->params.dit_kv_fixed_slots != 0)
+        if (shared->params.dit_kv_fixed_slots + shared->params.dit_kv_offloadable_slots != 0)
         {
             const auto dit_blocks = flow.decoder.estimator.transformer_blocks;
             worker.dit_kv_cache.build_kv_cache(
@@ -1022,7 +1022,7 @@ void cosyvoice_model_3::load(gguf_loader& loader)
                 dit_k_type,
                 dit_v_type,
                 2,
-                shared->params.dit_kv_fixed_slots,
+                shared->params.dit_kv_fixed_slots + (shared->params.dit_kv_offloadable_slots != 0 ? 1 : 0),
                 shared->params.dit_kv_offloadable_slots,
                 shared->params.flow_use_flash_attn
             );
