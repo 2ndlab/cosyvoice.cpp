@@ -32,7 +32,6 @@ struct ggml_backend_op_capabilities
     bool im2col_f16    : 1;
     bool fill          : 1;
     bool cumsum        : 1;
-    bool emb_cast_f32  : 1;
     bool top_k         : 1;
     bool leaky_relu    : 1;
     bool sin           : 1;

@@ -801,8 +801,7 @@ void cosyvoice_model_3::load(gguf_loader& loader)
     size_t mem_size = get_aligned_size(sizeof(float) * half_dim, alignment)
         + get_aligned_size(sizeof(float) * (hift.nfft / 2 + 1), alignment)
         + get_aligned_size(sizeof(float) * (hift.nfft / 2 + 1) * hift.nfft, alignment) * 2
-        + (get_aligned_size(sizeof(int) * shared->params.n_batch, alignment)
-            + get_aligned_size((shared->params.n_max_seq - 1) * shared->params.n_batch * sizeof(ggml_fp16_t), alignment)) * shared->params.n_workers;
+        + get_aligned_size(sizeof(int) * shared->params.n_batch, alignment) * shared->params.n_workers;
     for (const auto& [name, tensor] : tensors)
         if (tensor != &llm.embed_tokens_weight
             && tensor != &llm.speech_embedding_weight)
@@ -900,6 +899,10 @@ void cosyvoice_model_3::load(gguf_loader& loader)
             ggml_backend_synchronize(backend);
         });
 
+    shared->full_position_ids.reset(new int[shared->params.n_max_seq]);
+    for (int i = 0; i != shared->params.n_max_seq; ++i)
+        shared->full_position_ids.get()[i] = i;
+
     for (uint32_t i = 0; i != shared->params.n_workers; ++i)
     {
         auto worker = workers + i;
@@ -908,17 +911,10 @@ void cosyvoice_model_3::load(gguf_loader& loader)
         ggml_set_name(worker->position_ids, std::format("position_ids.{}", i).c_str());
         ggml_backend_tensor_alloc(shared->buffer.get(), worker->position_ids, buffer_base);
         ggml_set_param(worker->position_ids);
-        worker->full_position_ids.reset(new int[shared->params.n_max_seq]);
-        for (int i = 0; i != shared->params.n_max_seq; ++i)
-            worker->full_position_ids.get()[i] = i;
         buffer_base += get_aligned_size(worker->position_ids->nb[1], alignment);
 
-        worker->causal_mask_buffer.reset(new ggml_fp16_t[(shared->params.n_max_seq - 1) * shared->params.n_batch]);
         worker->causal_mask = ggml_new_tensor_2d(shared->ctx.get(), GGML_TYPE_F16, shared->params.n_max_seq - 1, shared->params.n_batch);
-        ggml_set_name(worker->causal_mask, std::format("attention_mask.{}", i).c_str());
-        ggml_set_param(worker->causal_mask);
-        ggml_backend_tensor_alloc(shared->buffer.get(), worker->causal_mask, buffer_base);
-        buffer_base += get_aligned_size(worker->causal_mask->nb[0] * worker->causal_mask->nb[1], alignment);
+        ggml_set_input(worker->causal_mask);
     }
 
     shared->noise_rng.seed(shared->params.seed);
@@ -1031,12 +1027,6 @@ void cosyvoice_model_3::load(gguf_loader& loader)
                 shared->params.flow_use_flash_attn
             );
         }
-    }
-
-    {
-        auto a = llm.embed_tokens_weight;
-        auto b = ggml_cast(worker->ctx0.get(), a, GGML_TYPE_F32);
-        shared->op_caps.emb_cast_f32 = ggml_backend_supports_op(backend, b);
     }
 
     for (auto& block : flow.decoder.estimator.transformer_blocks)
