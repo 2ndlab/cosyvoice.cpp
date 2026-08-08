@@ -18,8 +18,7 @@ quantize --help
 ```
 
 Supported quantization types:
-- `F16`, `Q8_0`, `Q5_0`, `Q5_1`, `Q4_0`, `Q4_1`
-- `Q6_K`, `Q5_K`, `Q4_K`, `Q3_K`, `Q2_K`
+- `F16`, `Q8_0`, `Q6_K`, `Q5_1`, `Q5_K`, `Q5_0`, `Q4_K`, `Q4_1`, `Q4_0`, `MXFP4`, `Q3_K`, `Q2_K`, `Q2_0`, `Q1_0`
 - `COPY`
 
 ### Options
@@ -211,8 +210,8 @@ If provided at startup, the WebUI pre-populates the frontend configuration field
 | `--inference-buffer-policy <shared\|balanced\|dedicated>` | Inference buffer policy. Default: `balanced`. |
 | `--llm-kv-cache-type <f32\|f16\|q8_0\|q5_1\|q5_0\|q4_1\|q4_0\|k=<type>,v=<type>[,fallback=<type>]>` | LLM KV cache type. Single type (e.g. `q8_0`) uses the same format for K and V. Default: `k=q8_0,v=q4_0,fallback=q8_0`. |
 | `--dit-kv-cache-type <f32\|f16\|q8_0\|q5_1\|q5_0\|q4_1\|q4_0\|k=<type>,v=<type>[,fallback=<type>]>` | DiT (flow matching) KV cache type. Same format as LLM KV cache. Default: `k=q8_0,v=q4_0,fallback=q8_0`. |
-| `--dit-kv-fixed-slots <value>` | Number of fixed (non-offloadable) DiT KV cache slots. Default: `0` (auto). |
-| `--dit-kv-offloadable-slots <value>` | Number of CPU-offloadable DiT KV cache slots. Default: `0` (auto). |
+| `--dit-kv-fixed-slots <value>` | Number of fixed (non-offloadable) DiT KV cache slots. Each fixed step gets a dedicated device slot; they map to the tail of the diffusion steps. Default: `0` (disabled). |
+| `--dit-kv-offloadable-slots <value>` | Number of CPU-offloadable DiT KV cache slots. All offloadable steps share a single device scratch slot and copy KV to/from one CPU buffer per slot. Default: `0` (disabled). A value of `1` is normalized to a fixed slot. `fixed + offloadable` is clamped to the diffusion step count (10). |
 | `--dit-kv-cache-length <value>` | Maximum sequence length for the DiT KV cache. Default: `0` (auto, `max-llm-len * 10`). |
 | `--llm-flash-attn <0\|1>` | Enable/disable LLM flash attention. Default: `1` (enabled). |
 | `--flow-flash-attn <0\|1>` | Enable/disable Flow/DiT flash attention. Default: `1` (enabled). |
@@ -431,8 +430,8 @@ Loads a model into the server at runtime. JSON body:
 Additional fields:
 - `llm_use_flash_attn`, `flow_use_flash_attn`: `true`/`false` toggles for flash attention.
 - `dit_kv_cache_type`: DiT KV cache type (same format as `k_cache_type`).
-- `dit_kv_fixed_slots`: Number of fixed DiT KV cache slots (0 = auto).
-- `dit_kv_offloadable_slots`: Number of CPU-offloadable DiT KV cache slots (0 = auto).
+- `dit_kv_fixed_slots`: Number of fixed DiT KV cache slots (0 = disabled). Each fixed step gets a dedicated device slot, mapped to the tail of the diffusion steps.
+- `dit_kv_offloadable_slots`: Number of CPU-offloadable DiT KV cache slots (0 = disabled). All offloadable steps share one device scratch slot plus one CPU buffer each. `1` is normalized to a fixed slot; `fixed + offloadable` is clamped to 10.
 - `dit_kv_cache_length`: Maximum DiT KV cache sequence length (0 = auto, `max_llm_len * 10`).
 - `chunk_tokens`: Tokens per streaming chunk (0 = model default).
 
@@ -757,8 +756,8 @@ Core options:
 - `--mode <zero-shot|instruct|cross-lingual>`: TTS mode. Default: auto-detect from `--instruction`.
 - `--instruction, -i <text>`: Instruction text for instruct mode.
 - `--dit-kv-cache-type <f32|f16|q8_0|q5_1|q5_0|q4_1|q4_0|k=<type>,v=<type>[,fallback=<type>]>`: DiT KV cache type (interactive only). Same format as `--llm-kv-cache-type`. Default: `k=q8_0,v=q4_0,fallback=q8_0`.
-- `--dit-kv-fixed-slots <value>`: Number of fixed (non-offloadable) DiT KV cache slots (interactive only). Default: `0` (auto).
-- `--dit-kv-offloadable-slots <value>`: Number of CPU-offloadable DiT KV cache slots (interactive only). Default: `0` (auto).
+- `--dit-kv-fixed-slots <value>`: Number of fixed (non-offloadable) DiT KV cache slots (interactive only). Each fixed step occupies a dedicated device slot; fixed steps map to the tail of the diffusion steps. Default: `0` (disabled).
+- `--dit-kv-offloadable-slots <value>`: Number of CPU-offloadable DiT KV cache slots (interactive only). All offloadable steps share a single device scratch slot and copy KV to/from one CPU buffer per slot. Default: `0` (disabled). A value of `1` is normalized to a fixed slot; `fixed + offloadable` is clamped to 10 (diffusion steps).
 - `--dit-kv-cache-length <value>`: Maximum DiT KV cache sequence length (interactive only). Default: `0` (auto, `max-llm-len * 10`).
 - `--stream`: Enable streaming playback in interactive mode (audio plays progressively during generation).
 - `--chunk-tokens <value>`: Tokens per streaming chunk (interactive only). Smaller chunks → lower first-chunk latency but higher overhead and RTF; larger chunks → lower RTF but higher first-chunk latency. Default: model-defined.
@@ -848,8 +847,8 @@ Required vs optional:
 | `--stream` | `false` | CLI |
 | `--chunk-tokens` | model-defined | model |
 | `--dit-kv-cache-type` | `k=q8_0,v=q4_0,fallback=q8_0` | CLI |
-| `--dit-kv-fixed-slots` | `0` (auto) | CLI |
-| `--dit-kv-offloadable-slots` | `0` (auto) | CLI |
+| `--dit-kv-fixed-slots` | `0` (disabled) | CLI |
+| `--dit-kv-offloadable-slots` | `0` (disabled) | CLI |
 | `--dit-kv-cache-length` | `0` (auto, `max-llm-len * 10`) | CLI |
 | `--llm-flash-attn` | `1` (enabled) | CLI |
 | `--flow-flash-attn` | `1` (enabled) | CLI |

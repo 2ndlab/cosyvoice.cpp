@@ -65,7 +65,7 @@ This project provides:
 
 ### Pre-built Releases
 
-The releases provided in this repository do not bundle the GGML backend libraries. To use them:
+Binary releases are self-contained on **macOS (arm64)** — they bundle the patched GGML backend libraries (including the Metal PAD-patch build, which is not available from llama.cpp releases). For all other platforms:
 1. Download `cosyvoice-cli` or `cosyvoice-server` from this repository's [Releases page](https://github.com/Lourdle/cosyvoice.cpp/releases).
 2. Download a `llama.cpp` release that matches your hardware and OS.
 3. Place the `cosyvoice` executables into the same directory as the GGML backend shared libraries (`ggml.dll`, `ggml-cuda.dll`, etc.).
@@ -359,7 +359,11 @@ Slots fall into three categories:
 | **Offloadable** | Offloaded to CPU when not in use | Saves device memory at the cost of transfer latency |
 | **Uncached** | Not stored at all | Full attention recomputation every step, no extra memory |
 
-Total slots = `fixed + offloadable`. Remaining steps (10 − total) use full recomputation.
+**Step-to-slot mapping.** The diffusion steps are laid out in order: uncached steps first, then offloadable steps, then fixed steps. Each **fixed** step gets its own dedicated device slot. All **offloadable** steps share a single scratch slot (device slot 0): a step computes into it, immediately copies the KV to its own CPU buffer, and the next step copies it back — so offloading needs only one device slot, plus one CPU buffer per offloadable step.
+
+**Automatic normalization.** A single offloadable slot (`fixed=0, offloadable=1`) is converted to a fixed slot (`fixed=1, offloadable=0`): one CPU round-trip per chunk plus a scratch slot is strictly more expensive than just keeping it resident. Both counts are also clamped so `fixed + offloadable` never exceeds the 10 diffusion steps.
+
+Total cached steps = `fixed + offloadable`. Remaining steps (10 − total) use full recomputation.
 
 The cache is large, so the default is 0 slots (all 10 steps fully recomputed). When enabled and the sequence exceeds the configured cache length, some positions are discarded — inference continues normally but output quality may degrade. Offloadable slots transfer data between device and CPU, which may not improve speed and can be slower than full recomputation depending on bandwidth.
 
@@ -369,10 +373,20 @@ The cache is large, so the default is 0 slots (all 10 steps fully recomputed). W
 
 DiT KV cache parameters are configured via CLI/server `--dit-kv-*` flags:
 
-- `--dit-kv-type`: Storage format (f32/f16/q8_0/...) for the DiT KV cache.
+- `--dit-kv-cache-type`: Storage format (f32/f16/q8_0/...) for the DiT KV cache.
 - `--dit-kv-fixed-slots`: Number of device-resident slots.
 - `--dit-kv-offloadable-slots`: Number of CPU-offloadable slots.
 - `--dit-kv-cache-length`: Maximum sequence positions kept in the cache.
+
+Suggested starting points (10 diffusion steps total):
+
+| Goal | `--dit-kv-fixed-slots` | `--dit-kv-offloadable-slots` |
+|------|------------------------|------------------------------|
+| Disable cache (default) | `0` | `0` |
+| Fastest, plenty of device memory | `10` | `0` |
+| Balanced speed / memory | `2` | `0` |
+| Speed with reduced device memory | `1` | `9` |
+| Minimal device memory (slower) | `0` | `9` |
 
 Streaming is enabled via `--stream` flag on CLI/server. Chunk granularity is controlled by `--chunk-tokens`.
 
