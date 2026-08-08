@@ -4,6 +4,8 @@
 #include <ggml-alloc.h>
 #include <ggml-cpp.h>
 
+#include <vector>
+
 // Non-FlashAttention mode currently rebuilds parts of the graph instead of reusing one.
 class cosyvoice_kv_cache
 {
@@ -27,6 +29,8 @@ public:
         bool fattn);
 
     void update_cache(ggml_context* ctx0, ggml_cgraph* gf, ggml_tensor*& k, ggml_tensor*& v, ggml_tensor* position_ids, int layer_idx);
+
+    void set_input_v_idxs(ggml_backend_t backend, const int32_t* positions, uint32_t n_tokens, uint32_t n_tokens_per_batch);
 
     ggml_tensor* attention_forward(ggml_context* ctx0, ggml_tensor* query_states, ggml_tensor* key_states, ggml_tensor* value_states, ggml_tensor* attention_mask) const;
 
@@ -60,4 +64,6 @@ private:
     ggml_context* ctx;
     struct kv_cache_layer* kv_cache_layers;
     struct offloaded_kv_cache* offloaded_cache;
+    ggml_tensor* v_idxs;
+    std::vector<int32_t>* v_idxs_data;
 };

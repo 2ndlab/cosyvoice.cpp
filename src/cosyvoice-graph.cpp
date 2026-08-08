@@ -358,11 +358,8 @@ ggml_tensor* Attention::build_cgraph(ggml_context* ctx, ggml_tensor* x, ggml_ten
     key = ggml_reshape_4d(ctx, key, head_dim, heads, full_seq_len, batch_size);
     value = ggml_reshape_4d(ctx, value, value->ne[0] / heads, heads, full_seq_len, batch_size);
 
-    query = ggml_permute(ctx, query, 0, 2, 1, 3);
-    key = ggml_permute(ctx, key, 0, 2, 1, 3);
-    value = ggml_permute(ctx, value, 0, 2, 1, 3);
-
     ggml_tensor* attn_output;
+    query = ggml_permute(ctx, query, 0, 2, 1, 3);
     if (kv_cache)
     {
         kv_cache->update_cache(ctx, gf, key, value, original_position_ids, layer_idx);
@@ -370,8 +367,8 @@ ggml_tensor* Attention::build_cgraph(ggml_context* ctx, ggml_tensor* x, ggml_ten
     }
     else
     {
-        query = ggml_cont(ctx, query);
-        key = ggml_cont(ctx, key);
+        key = ggml_permute(ctx, key, 0, 2, 1, 3);
+        value = ggml_permute(ctx, value, 0, 2, 1, 3);
 
         if (fattn)
         {

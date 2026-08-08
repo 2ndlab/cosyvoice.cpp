@@ -35,6 +35,7 @@ struct cosyvoice_model_shared
     cosyvoice_generation_config_t config;
     cosyvoice_noise_callback_t noise_callback;
     void* noise_callback_ctx;
+    std::unique_ptr<int[]> full_position_ids;
 
     std::unique_ptr<char[]> architecture;
     std::unique_ptr<char[]> instruction_prefix;
@@ -60,8 +61,6 @@ struct cosyvoice_worker_context
     std::mt19937 sampler_rng, noise_rng;
 
     std::vector<int> tokens;
-    std::unique_ptr<int[]> full_position_ids;
-    std::unique_ptr<ggml_fp16_t[]> causal_mask_buffer;
 
     cosyvoice_kv_cache llm_kv_cache;
     cosyvoice_kv_cache dit_kv_cache;

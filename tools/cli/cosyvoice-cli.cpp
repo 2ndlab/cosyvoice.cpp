@@ -91,9 +91,11 @@ struct cli_options
     uint32_t dit_kv_cache_length = 0;
     bool has_inference_buffer_policy = false;
     cosyvoice_inference_buffer_policy_t inference_buffer_policy = COSYVOICE_INFERENCE_BUFFER_POLICY_BALANCED;
+#ifndef COSYVOICE_NO_PLAYBACK
     bool stream = false;
     uint32_t chunk_tokens = 0;
     bool has_chunk_tokens = false;
+#endif
     bool verbose = false;
     bool quiet = false;
     bool has_temperature = false;
@@ -336,8 +338,10 @@ static void print_interactive_commands()
     printf("  /seed [value]                Show or set next seed.\n");
     printf("  /seed-policy <fixed|random>  Show or set seed policy.\n");
     printf("  /help                        Show command list.\n");
+#ifndef COSYVOICE_CLI_NO_PLAYBACK
     printf("  /stream                      Toggle streaming playback.\n");
     printf("  /chunk-tokens [value]        Show or set tokens per streaming chunk.\n");
+#endif
     printf("  /exit                        Exit interactive mode. Ctrl+C also exits.\n");
 }
 
@@ -383,8 +387,10 @@ static void print_usage(const char* argv0)
     printf("  --dit-kv-fixed-slots <value>                Number of fixed (non-offloadable) DiT KV slots (interactive only). Default: 0.\n");
     printf("  --dit-kv-offloadable-slots <value>          Number of offloadable DiT KV slots (interactive only). Default: 0.\n");
     printf("  --dit-kv-cache-length <value>               DiT KV cache max seq length (interactive only). Default: max-llm-len * 10.\n");
+#ifndef COSYVOICE_CLI_NO_PLAYBACK
     printf("  --stream                                    Enable streaming playback in interactive mode.\n");
     printf("  --chunk-tokens <value>                      Tokens per streaming chunk (interactive only). Default: model-defined.\n");
+#endif
     printf("  --llm-flash-attn <0|1>                      Enable/disable LLM flash attention. Default: 1.\n");
     printf("  --flow-flash-attn <0|1>                     Enable/disable Flow/DiT flash attention. Default: 1.\n");
     printf("  --seed <value>                              Fixed seed for sampling.\n");
@@ -944,7 +950,9 @@ static void run_interactive_loop(
     uint32_t sample_rate)
 {
     audio_cache cache;
+#ifndef COSYVOICE_CLI_NO_PLAYBACK
     bool streaming = options.stream;
+#endif
     std::string line;
     if (seed_state && !seed_state->has_next_seed)
     {
@@ -1169,6 +1177,7 @@ static void run_interactive_loop(
         std::chrono::steady_clock::time_point gen_start;
         std::chrono::steady_clock::time_point gen_end;
 
+#ifndef COSYVOICE_CLI_NO_PLAYBACK
         if (streaming)
         {
             struct stream_play_state
@@ -1236,6 +1245,7 @@ static void run_interactive_loop(
             }
         }
         else
+#endif
         {
             gen_start = std::chrono::steady_clock::now();
             std::string error;
@@ -1679,6 +1689,7 @@ int tool_entry(int argc, char** argv)
             }
             options.dit_kv_cache_length = v;
         }
+        #ifndef COSYVOICE_CLI_NO_PLAYBACK
         else if (str_casecmp(arg, "--stream") == 0)
             options.stream = true;
         else if (str_casecmp(arg, "--chunk-tokens") == 0)
@@ -1693,6 +1704,7 @@ int tool_entry(int argc, char** argv)
             options.chunk_tokens = v;
             options.has_chunk_tokens = true;
         }
+#endif
         else if (str_casecmp(arg, "--inference-buffer-policy") == 0)
         {
             auto value = get_arg_value();
@@ -2158,8 +2170,10 @@ int tool_entry(int argc, char** argv)
     cosyvoice_tts_context_set_split_text_enabled(tts_ctx.get(), options.split_text_enabled);
     cosyvoice_tts_context_set_fast_split_text_enabled(tts_ctx.get(), options.fast_split_text_enabled);
     cosyvoice_tts_context_set_fade_in_enabled(tts_ctx.get(), options.fade_in_enabled);
+#ifndef COSYVOICE_CLI_NO_PLAYBACK
     if (options.interactive && options.has_chunk_tokens)
         cosyvoice_set_chunk_tokens(ctx.get(), options.chunk_tokens);
+#endif
     cosyvoice_context_params_t effective_params;
     cosyvoice_get_context_params(ctx.get(), &effective_params);
     cosyvoice_generation_config_t generation_config;

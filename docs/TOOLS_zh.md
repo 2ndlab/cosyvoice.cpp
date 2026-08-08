@@ -18,8 +18,7 @@ quantize --help
 ```
 
 支持的量化类型：
-- `F16`, `Q8_0`, `Q5_0`, `Q5_1`, `Q4_0`, `Q4_1`
-- `Q6_K`, `Q5_K`, `Q4_K`, `Q3_K`, `Q2_K`
+- `F16`, `Q8_0`, `Q6_K`, `Q5_0`, `Q5_1`, `Q5_K`, `Q4_K`, `Q4_1`, `Q4_0`, `MXFP4`， `Q3_K`, `Q2_K`, `Q2_0`, `Q1_0`
 - `COPY`
 
 ### 参数列表
@@ -211,8 +210,8 @@ WebUI 是一个现代化的单页应用，提供以下功能：
 | `--inference-buffer-policy <shared\|balanced\|dedicated>` | 推理缓冲区策略，默认 `balanced`。 |
 | `--llm-kv-cache-type <f32\|f16\|q8_0\|q5_1\|q5_0\|q4_1\|q4_0\|k=<type>,v=<type>[,fallback=<type>]>` | LLM KV cache 类型。单一类型（如 `q8_0`）为 K 和 V 使用相同格式。默认 `k=q8_0,v=q4_0,fallback=q8_0`。 |
 | `--dit-kv-cache-type <f32\|f16\|q8_0\|q5_1\|q5_0\|q4_1\|q4_0\|k=<type>,v=<type>[,fallback=<type>]>` | DiT（flow matching）KV cache 类型。格式同 LLM KV cache。默认 `k=q8_0,v=q4_0,fallback=q8_0`。 |
-| `--dit-kv-fixed-slots <value>` | 固定（不可卸载）DiT KV cache 槽位数，默认 `0`（自动）。 |
-| `--dit-kv-offloadable-slots <value>` | 可 CPU 卸载的 DiT KV cache 槽位数，默认 `0`（自动）。 |
+| `--dit-kv-fixed-slots <value>` | 固定（不可卸载）DiT KV cache 槽位数。每个固定步独占一个设备槽位，映射到扩散步的尾部。默认 `0`（禁用）。 |
+| `--dit-kv-offloadable-slots <value>` | 可 CPU 卸载的 DiT KV cache 槽位数。所有可卸载步共享一个设备临时槽位，每个槽位各对应一个 CPU 缓冲区来拷贝 KV。默认 `0`（禁用）。值为 `1` 时归一化为固定槽位；`fixed + offloadable` 会被裁剪到不超过扩散步数（10）。 |
 | `--dit-kv-cache-length <value>` | DiT KV cache 最大序列长度，默认 `0`（自动，为 `max-llm-len * 10`）。 |
 | `--llm-flash-attn <0\|1>` | 启用/禁用 LLM Flash Attention。默认 `1`（启用）。 |
 | `--flow-flash-attn <0\|1>` | 启用/禁用 Flow/DiT Flash Attention。默认 `1`（启用）。 |
@@ -431,8 +430,8 @@ DiT KV cache 默认值从加载后的生效配置中获取。`chunk_tokens` 反�
 其他字段：
 - `llm_use_flash_attn`、`flow_use_flash_attn`：`true`/`false`，Flash Attention 开关。
 - `dit_kv_cache_type`：DiT KV cache 类型（格式同 `k_cache_type`）。
-- `dit_kv_fixed_slots`：固定 DiT KV cache 槽位数（0 = 自动）。
-- `dit_kv_offloadable_slots`：可 CPU 卸载的 DiT KV cache 槽位数（0 = 自动）。
+- `dit_kv_fixed_slots`：固定 DiT KV cache 槽位数（0 = 禁用）。每个固定步独占一个设备槽位，映射到扩散步尾部。
+- `dit_kv_offloadable_slots`：可 CPU 卸载的 DiT KV cache 槽位数（0 = 禁用）。所有可卸载步共享一个设备临时槽位，各配一个 CPU 缓冲区。`1` 归一化为固定槽位；`fixed + offloadable` 裁剪到不超过 10。
 - `dit_kv_cache_length`：DiT KV cache 最大序列长度（0 = 自动，为 `max_llm_len * 10`）。
 - `chunk_tokens`：每个流式块的 token 数（0 = 模型默认）。
 
@@ -735,8 +734,8 @@ cosyvoice-cli \
 - `--mode <zero-shot|instruct|cross-lingual>`：TTS 模式。默认按 `--instruction` 自动判定。
 - `--instruction, -i <text>`：instruct 模式指令文本。
 - `--dit-kv-cache-type <f32|f16|q8_0|q5_1|q5_0|q4_1|q4_0|k=<type>,v=<type>[,fallback=<type>]>`：DiT KV cache 类型（仅交互模式）。格式同 `--llm-kv-cache-type`。默认 `k=q8_0,v=q4_0,fallback=q8_0`。
-- `--dit-kv-fixed-slots <value>`：固定（不可卸载）DiT KV cache 槽位数（仅交互模式）。默认 `0`（自动）。
-- `--dit-kv-offloadable-slots <value>`：可 CPU 卸载的 DiT KV cache 槽位数（仅交互模式）。默认 `0`（自动）。
+- `--dit-kv-fixed-slots <value>`：固定（不可卸载）DiT KV cache 槽位数（仅交互模式）。每个固定步独占一个设备槽位，映射到扩散步尾部。默认 `0`（禁用）。
+- `--dit-kv-offloadable-slots <value>`：可 CPU 卸载的 DiT KV cache 槽位数（仅交互模式）。所有可卸载步共享一个设备临时槽位，每槽各对应一个 CPU 缓冲区。默认 `0`（禁用）。值为 `1` 归一化为固定槽位；`fixed + offloadable` 裁剪到不超过 10（扩散步数）。
 - `--dit-kv-cache-length <value>`：DiT KV cache 最大序列长度（仅交互模式）。默认 `0`（自动，为 `max-llm-len * 10`）。
 - `--stream`：在交互模式下启用流式播放（生成过程中渐进播放音频）。
 - `--chunk-tokens <value>`：每个流式块的 token 数（仅交互模式）。chunk 越小，首包延迟越低，但上下文调度开销越大，RTF 越高；chunk 越大，RTF 越低，但首包延迟越高。默认：模型定义。
@@ -826,8 +825,8 @@ cosyvoice-cli \
 | `--stream` | `false` | CLI |
 | `--chunk-tokens` | 模型定义 | 模型 |
 | `--dit-kv-cache-type` | `k=q8_0,v=q4_0,fallback=q8_0` | CLI |
-| `--dit-kv-fixed-slots` | `0`（自动） | CLI |
-| `--dit-kv-offloadable-slots` | `0`（自动） | CLI |
+| `--dit-kv-fixed-slots` | `0`（禁用） | CLI |
+| `--dit-kv-offloadable-slots` | `0`（禁用） | CLI |
 | `--dit-kv-cache-length` | `0`（自动，`max-llm-len * 10`） | CLI |
 | `--llm-flash-attn` | `1`（启用） | CLI |
 | `--flow-flash-attn` | `1`（启用） | CLI |

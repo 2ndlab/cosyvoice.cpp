@@ -56,6 +56,11 @@ jobs:
         run: |
           brew update
           brew install pkg-config icu4c simde ffmpeg
+          # icu4c is keg-only, so expose its pkgconfig/include dirs explicitly
+          # (feeds -DICU_ROOT in the build step; also lets pkg-config find ICU)
+          ICU_PREFIX=$(brew --prefix icu4c 2>/dev/null || brew --prefix icu4c@78)
+          echo "ICU_ROOT_PATH=${ICU_PREFIX}" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=${ICU_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Setup MSVC Environment
         if: matrix.os == 'windows-2025-vs2026'
@@ -163,13 +168,6 @@ jobs:
           SHARED_DEPS="$PWD/shared_deps"
 
           mkdir -p "${SHARED_DEPS}/onnxruntime"
-
-          if [ "${{ matrix.os }}" == "macos-26" ]; then
-            export CXX="$(brew --prefix llvm@20)/bin/clang++"
-            SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
-            export PKG_CONFIG_PATH="$(brew --prefix icu4c)/lib/pkgconfig:$PKG_CONFIG_PATH"
-            ICU_ROOT_PATH="$(brew --prefix icu4c)"
-          fi
           
           for f in "${FRONTENDS[@]}"; do
             for a in "${AUDIOS[@]}"; do
@@ -191,8 +189,6 @@ jobs:
                   "-DCMAKE_BUILD_TYPE=Release"
                   "-DCMAKE_C_COMPILER=clang"
                   "-DCMAKE_CXX_COMPILER=${CXX:-clang++}"
-                  "-DGGML_ACCELERATE=OFF"
-                  "-DGGML_BLAS=OFF"
                   "-G" "Ninja"
                   "-DORT_PREBUILT_DIR=${SHARED_DEPS}/onnxruntime"
                 )
@@ -232,7 +228,11 @@ jobs:
                 find "$DIST_DIR" -name "*.lib" -delete 2>/dev/null || true
                 find "$DIST_DIR" -name "*.exp" -delete 2>/dev/null || true
                 find "$DIST_DIR" -name "*.pdb" -delete 2>/dev/null || true
-                find "$DIST_DIR" -name "*ggml*" -delete 2>/dev/null || true
+                # macOS bundles the patched GGML dylibs (Metal PAD patch); all
+                # other platforms let users grab stock GGML from llama.cpp.
+                if [ "${{ matrix.os }}" != "macos-26" ]; then
+                  find "$DIST_DIR" -name "*ggml*" -delete 2>/dev/null || true
+                fi
                 find "$DIST_DIR" -name "*icu*" -delete 2>/dev/null || true
                 find "$DIST_DIR" -name "*avcodec*" -delete 2>/dev/null || true
                 find "$DIST_DIR" -name "*avformat*" -delete 2>/dev/null || true

@@ -85,7 +85,7 @@ static const OptionDef s_options[OPT_COUNT] = {
     { "--help",         'h', 0, "Show this help message and exit." },
     { "--file",         'f', 1, "Input GGUF file path." },
     { "--output-file",  'o', 1, "Output GGUF file path." },
-    { "--type",         't', 1, "Default quantization type. Supported: F16, Q8_0, Q5_0, Q5_1, Q4_0, Q4_1, Q6_K, Q5_K, Q4_K, Q3_K, Q2_K, COPY." },
+    { "--type",         't', 1, "Default quantization type. Supported: F16, Q8_0, Q5_0, Q5_1, Q4_0, Q4_1, MXFP4, Q6_K, Q5_K, Q4_K, Q3_K, Q2_K, Q2_0, Q1_0, COPY." },
     { "--custom-string",'c', 2, "Custom metadata key-value pair (repeatable). Usage: -c <key> <value>" },
     { "--tensor-map",   'M', 1, "JSON file mapping tensor name regex to quantization type. Unlisted tensors use --type default." },
 };
@@ -117,11 +117,14 @@ static ggml_ftype parse_ftype(const char* s)
     if (str_casecmp(s, "Q5_1") == 0) return GGML_FTYPE_MOSTLY_Q5_1;
     if (str_casecmp(s, "Q4_0") == 0) return GGML_FTYPE_MOSTLY_Q4_0;
     if (str_casecmp(s, "Q4_1") == 0) return GGML_FTYPE_MOSTLY_Q4_1;
+    if (str_casecmp(s, "MXFP4") == 0) return GGML_FTYPE_MOSTLY_MXFP4;
     if (str_casecmp(s, "Q6_K") == 0) return GGML_FTYPE_MOSTLY_Q6_K;
     if (str_casecmp(s, "Q5_K") == 0) return GGML_FTYPE_MOSTLY_Q5_K;
     if (str_casecmp(s, "Q4_K") == 0) return GGML_FTYPE_MOSTLY_Q4_K;
     if (str_casecmp(s, "Q3_K") == 0) return GGML_FTYPE_MOSTLY_Q3_K;
     if (str_casecmp(s, "Q2_K") == 0) return GGML_FTYPE_MOSTLY_Q2_K;
+    if (str_casecmp(s, "Q2_0") == 0) return GGML_FTYPE_MOSTLY_Q2_0;
+    if (str_casecmp(s, "Q1_0") == 0) return GGML_FTYPE_MOSTLY_Q1_0;
     if (str_casecmp(s, "COPY") == 0) return GGML_FTYPE_UNKNOWN;
     return static_cast<ggml_ftype>(-2);
 }
@@ -131,6 +134,9 @@ static ggml_type get_fallback_type(ggml_type type, int64_t ne)
     if (ne % ggml_blck_size(type) == 0) return type;
     switch (type)
     {
+    case GGML_TYPE_Q1_0:
+    case GGML_TYPE_Q2_0:
+    case GGML_TYPE_MXFP4:
     case GGML_TYPE_Q4_0:
     case GGML_TYPE_Q4_1:
     case GGML_TYPE_Q5_0:

@@ -645,13 +645,29 @@ Extends `cosyvoice_context_params_v2_t` with DiT (diffusion) KV cache configurat
 - `dit_kv_cache_fallback`: Fallback type when preferred K/V type is unsupported.
 - `dit_kv_cache_type`: Shorthand — assigns a unified type (no separate K/V).
 - `dit_allow_kv_cache_fallback`: If true, fall back to a flash-attention-compatible type.
-- `dit_kv_fixed_slots`: Number of fixed (device memory, never offloaded) DiT KV slots. Each slot holds the KV cache for one diffusion step.
-- `dit_kv_offloadable_slots`: Number of offloadable (CPU offload) DiT KV slots.
+- `dit_kv_fixed_slots`: Number of fixed (device memory, never offloaded) DiT KV slots. Each fixed slot holds the KV cache for one diffusion step and gets a dedicated device slot index.
+- `dit_kv_offloadable_slots`: Number of offloadable (CPU offload) DiT KV slots. All offloadable steps share a single device scratch slot and copy KV to/from one CPU buffer per slot.
 - `dit_kv_cache_length`: Maximum sequence length for the DiT KV cache. 0 to use default (`n_max_seq × 10`).
 
 ### DiT KV Cache Concept
 
-See [README.md — Streaming TTS](#streaming-tts--dit-kv-cache) for a detailed explanation of the DiT KV cache concept.
+See [README.md — Streaming TTS](../README.md#streaming-tts--dit-kv-cache) for a user-facing overview. This section documents how the cache is laid out internally.
+
+**Slot layout.** The device cache allocates `n_slots = fixed_slots + (offloadable_slots > 0 ? 1 : 0)` physical slots. When offloading is enabled, slot index 0 is a dedicated **scratch** slot shared by all offloadable steps; fixed steps then occupy slot indices `1..fixed_slots`. When offloading is disabled, the fixed slots occupy indices `0..fixed_slots-1`.
+
+**Step-to-slot scheduling.** The `diffusion_steps` (10) are partitioned in order into `n_nocache = 10 − fixed − offloadable` uncached steps, then the offloadable steps, then the fixed steps:
+
+- **Uncached steps** recompute attention every step and touch no KV slot.
+- **Offloadable steps** all compute into slot 0, then copy KV to their own CPU buffer (`offload_slot`), and reload it on the next step. One CPU buffer is allocated per offloadable slot.
+- **Fixed steps** each write to their dedicated device slot; their KV persists on device so the last fixed step seeds the cache of the next streaming chunk.
+
+**Flash Attention path.** With `flow_use_flash_attn` the graph is built once and reused while the view chain slides through slots via `slide_kv_slot`. The boundary slide from the scratch slot (last offloadable step) into slot 1 hands KV off to the fixed chain; fixed steps never rebind, so their chain position is determined purely by the slide index.
+
+**Non-FA path.** Each cached step rebuilds a fresh graph. The step config rebinds an explicit slot — offloadable steps `bind_slot(0)`, fixed steps `bind_slot(step + slot_offset)` — so the fixed steps land on their dedicated slot indices.
+
+**Normalization and clamping.** At load time a single offloadable slot (`offloadable == 1`) is converted to a fixed slot (`fixed++, offloadable = 0`), and both counts are clamped so `fixed ≤ 10` and `fixed + offloadable ≤ 10`. The builder also allocates `offloadable` CPU-safe KV buffers used to round-trip offloaded state.
+
+**Cache length.** `dit_kv_cache_length` caps the max sequence positions retained per slot. When the stream exceeds it, part of the context is discarded — inference continues normally and never crashes, but audio quality may degrade.
 
 ## cosyvoice_load_from_file_with_params_v3
 

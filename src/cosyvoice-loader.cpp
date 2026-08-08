@@ -542,19 +542,27 @@ static std::tuple<ggml_type, ggml_type> cosyvoice_check_kv_cache_types(
     {
         auto fattn_check = [&](ggml_type check_k, ggml_type check_v) -> bool
         {
+            const auto k_head_dim = k_proj.weight->ne[1] / num_kv_heads;
+            const auto v_head_dim = v_proj.weight->ne[1] / num_kv_heads;
+
             auto position_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
-            auto q = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, q_proj.weight->ne[1] / num_attn_heads, 1, num_attn_heads);
-            auto k = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k_proj.weight->ne[1] / num_kv_heads, 1, num_kv_heads);
-            auto v = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, v_proj.weight->ne[1] / num_kv_heads, 1, num_kv_heads);
-            auto cached_k = ggml_new_tensor(ctx, check_k, GGML_MAX_DIMS, k->ne);
-            auto cached_v = ggml_new_tensor(ctx, check_v, GGML_MAX_DIMS, v->ne);
+            auto q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, q_proj.weight->ne[1] / num_attn_heads, 1, num_attn_heads, 1);
+            auto k = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k_head_dim * num_kv_heads, 1, 1);
+            auto v = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, v_head_dim * num_kv_heads, 1, 1);
+            auto cached_k = ggml_new_tensor_3d(ctx, check_k, k_head_dim * num_kv_heads, 1, 1);
+            auto cached_v = ggml_new_tensor_3d(ctx, check_v, v_head_dim * num_kv_heads, 1, 1);
 
             cached_k = ggml_set_rows(ctx, cached_k, k, position_ids);
             cached_v = ggml_set_rows(ctx, cached_v, v, position_ids);
             if (!ggml_backend_supports_op(backend, cached_k) || !ggml_backend_supports_op(backend, cached_v))
                 return false;
 
-            auto o = ggml_flash_attn_ext(ctx, q, cached_k, cached_v, nullptr, 1.f / std::sqrt(static_cast<float>(k->ne[0])), 0.f, 0.f);
+            cached_k = ggml_view_4d(ctx, cached_k, k_head_dim, num_kv_heads, 1, 1, cached_k->nb[1] / num_kv_heads, cached_k->nb[1], cached_k->nb[2], 0);
+            cached_k = ggml_permute(ctx, cached_k, 0, 2, 1, 3);
+            cached_v = ggml_view_4d(ctx, cached_v, v_head_dim, num_kv_heads, 1, 1, cached_v->nb[1] / num_kv_heads, cached_v->nb[1], cached_v->nb[2], 0);
+            cached_v = ggml_permute(ctx, cached_v, 0, 2, 1, 3);
+
+            auto o = ggml_flash_attn_ext(ctx, q, cached_k, cached_v, nullptr, 1.f / std::sqrt(static_cast<float>(k_head_dim)), 0.f, 0.f);
             return ggml_backend_supports_op(backend, o);
         };
 
@@ -632,15 +640,30 @@ static std::tuple<ggml_type, ggml_type> cosyvoice_check_kv_cache_types(
         {
             if (ggml_is_quantized(check_v)) return false;
 
-            auto position_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
-            auto q = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, q_proj.weight->ne[1] / num_attn_heads, 1, num_attn_heads);
-            auto k = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k_proj.weight->ne[1] / num_kv_heads, 1, num_kv_heads);
-            auto v = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 1, v_proj.weight->ne[1] / num_kv_heads, num_kv_heads);
-            auto cached_k = ggml_new_tensor(ctx, check_k, GGML_MAX_DIMS, k->ne);
-            auto cached_v = ggml_new_tensor(ctx, check_v, GGML_MAX_DIMS, v->ne);
+            const auto k_head_dim = k_proj.weight->ne[1] / num_kv_heads;
+            const auto v_head_dim = v_proj.weight->ne[1] / num_kv_heads;
 
+            auto position_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 1);
+            auto q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, q_proj.weight->ne[1] / num_attn_heads, 1, num_attn_heads, 1);
+            auto k = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, k_head_dim * num_kv_heads, 1, 1);
+            auto cached_k = ggml_new_tensor_3d(ctx, check_k, k_head_dim * num_kv_heads, 1, 1);
+
+            // K: head-merged cache rows scattered by position ids, then viewed back into
+            // heads and permuted (see cosyvoice_kv_cache::update_cache)
             cached_k = ggml_set_rows(ctx, cached_k, k, position_ids);
-            cached_v = ggml_cpy(ctx, v, cached_v);
+            cached_k = ggml_view_4d(ctx, cached_k, k_head_dim, num_kv_heads, 1, 1, cached_k->nb[1] / num_kv_heads, cached_k->nb[1], cached_k->nb[2], 0);
+            cached_k = ggml_permute(ctx, cached_k, 0, 2, 1, 3);
+
+            // V: stored transposed and updated element-wise through the flattened cache
+            // via v_idxs (see cosyvoice_kv_cache::update_cache)
+            auto v = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, v_head_dim * num_kv_heads);
+            auto cached_v = ggml_new_tensor_2d(ctx, check_v, 1, v_head_dim * num_kv_heads);
+            auto v_idxs = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, v_head_dim * num_kv_heads);
+            auto v_flat = ggml_reshape_2d(ctx, v, 1, ggml_nelements(v));
+            auto cached_v_flat = ggml_reshape_2d(ctx, cached_v, 1, ggml_nelements(cached_v));
+            cached_v = ggml_set_rows(ctx, cached_v_flat, v_flat, v_idxs);
+            cached_v = ggml_view_4d(ctx, cached_v, 1, v_head_dim, num_kv_heads, 1, cached_v->nb[1], v_head_dim * cached_v->nb[1], cached_v->nb[2], 0);
+
             if (!ggml_backend_supports_op(backend, cached_k) || !ggml_backend_supports_op(backend, cached_v))
                 return false;
 
@@ -778,8 +801,7 @@ void cosyvoice_model_3::load(gguf_loader& loader)
     size_t mem_size = get_aligned_size(sizeof(float) * half_dim, alignment)
         + get_aligned_size(sizeof(float) * (hift.nfft / 2 + 1), alignment)
         + get_aligned_size(sizeof(float) * (hift.nfft / 2 + 1) * hift.nfft, alignment) * 2
-        + (get_aligned_size(sizeof(int) * shared->params.n_batch, alignment)
-            + get_aligned_size((shared->params.n_max_seq - 1) * shared->params.n_batch * sizeof(ggml_fp16_t), alignment)) * shared->params.n_workers;
+        + get_aligned_size(sizeof(int) * shared->params.n_batch, alignment) * shared->params.n_workers;
     for (const auto& [name, tensor] : tensors)
         if (tensor != &llm.embed_tokens_weight
             && tensor != &llm.speech_embedding_weight)
@@ -877,6 +899,10 @@ void cosyvoice_model_3::load(gguf_loader& loader)
             ggml_backend_synchronize(backend);
         });
 
+    shared->full_position_ids.reset(new int[shared->params.n_max_seq]);
+    for (int i = 0; i != shared->params.n_max_seq; ++i)
+        shared->full_position_ids.get()[i] = i;
+
     for (uint32_t i = 0; i != shared->params.n_workers; ++i)
     {
         auto worker = workers + i;
@@ -885,17 +911,10 @@ void cosyvoice_model_3::load(gguf_loader& loader)
         ggml_set_name(worker->position_ids, std::format("position_ids.{}", i).c_str());
         ggml_backend_tensor_alloc(shared->buffer.get(), worker->position_ids, buffer_base);
         ggml_set_param(worker->position_ids);
-        worker->full_position_ids.reset(new int[shared->params.n_max_seq]);
-        for (int i = 0; i != shared->params.n_max_seq; ++i)
-            worker->full_position_ids.get()[i] = i;
         buffer_base += get_aligned_size(worker->position_ids->nb[1], alignment);
 
-        worker->causal_mask_buffer.reset(new ggml_fp16_t[(shared->params.n_max_seq - 1) * shared->params.n_batch]);
         worker->causal_mask = ggml_new_tensor_2d(shared->ctx.get(), GGML_TYPE_F16, shared->params.n_max_seq - 1, shared->params.n_batch);
-        ggml_set_name(worker->causal_mask, std::format("attention_mask.{}", i).c_str());
-        ggml_set_param(worker->causal_mask);
-        ggml_backend_tensor_alloc(shared->buffer.get(), worker->causal_mask, buffer_base);
-        buffer_base += get_aligned_size(worker->causal_mask->nb[0] * worker->causal_mask->nb[1], alignment);
+        ggml_set_input(worker->causal_mask);
     }
 
     shared->noise_rng.seed(shared->params.seed);
@@ -989,7 +1008,7 @@ void cosyvoice_model_3::load(gguf_loader& loader)
             shared->params.llm_use_flash_attn
         );
 
-        if (shared->params.dit_kv_fixed_slots != 0)
+        if (shared->params.dit_kv_fixed_slots + shared->params.dit_kv_offloadable_slots != 0)
         {
             const auto dit_blocks = flow.decoder.estimator.transformer_blocks;
             worker.dit_kv_cache.build_kv_cache(
@@ -1003,17 +1022,11 @@ void cosyvoice_model_3::load(gguf_loader& loader)
                 dit_k_type,
                 dit_v_type,
                 2,
-                shared->params.dit_kv_fixed_slots,
+                shared->params.dit_kv_fixed_slots + (shared->params.dit_kv_offloadable_slots != 0 ? 1 : 0),
                 shared->params.dit_kv_offloadable_slots,
                 shared->params.flow_use_flash_attn
             );
         }
-    }
-
-    {
-        auto a = llm.embed_tokens_weight;
-        auto b = ggml_cast(worker->ctx0.get(), a, GGML_TYPE_F32);
-        shared->op_caps.emb_cast_f32 = ggml_backend_supports_op(backend, b);
     }
 
     for (auto& block : flow.decoder.estimator.transformer_blocks)

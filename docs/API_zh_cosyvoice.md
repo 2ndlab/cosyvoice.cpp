@@ -651,13 +651,29 @@ struct cosyvoice_context_params_v3_cpp : cosyvoice_context_params_v2_cpp
 - `dit_kv_cache_fallback`：首选类型不受支持时的回退类型。
 - `dit_kv_cache_type`：快捷方式——指定统一类型（不分离 K/V）。
 - `dit_allow_kv_cache_fallback`：若为 true，不支持时回退到 flash attention 兼容类型。
-- `dit_kv_fixed_slots`：固定（设备内存，从不卸载）DiT KV 槽位数。每个槽位对应一个扩散步的 KV 缓存。
-- `dit_kv_offloadable_slots`：可卸载（CPU 卸载）DiT KV 槽位数。
+- `dit_kv_fixed_slots`：固定（设备内存，从不卸载）DiT KV 槽位数。每个固定步对应一个扩散步的 KV 缓存，独占一个设备槽位。
+- `dit_kv_offloadable_slots`：可卸载（CPU 卸载）DiT KV 槽位数。所有可卸载步共享同一个设备临时槽位，每槽各对应一个 CPU 缓冲区来拷贝 KV。
 - `dit_kv_cache_length`：DiT KV 缓存最大序列长度。0 表示使用默认值（`n_max_seq × 10`）。
 
 ### DiT KV 缓存概念
 
-详见 [README_zh.md — 流式 TTS 与 DiT KV 缓存](#) 的详细说明。
+面向用户的概述见 [README_zh.md — 流式 TTS 与 DiT KV 缓存](../README_zh.md#流式-tts-与-dit-kv-缓存)；以下说明内部布局。
+
+**槽位布局。** 设备缓存分配 `n_slots = fixed_slots + (offloadable_slots > 0 ? 1 : 0)` 个物理槽位。启用卸载时，槽位 0 是专用 **临时（scratch）槽位**，由所有可卸载步共享；固定步占用槽位 `1..fixed_slots`。未启用卸载时，固定步占用槽位 `0..fixed_slots-1`。
+
+**步-槽位调度。** `diffusion_steps`（10 步）按顺序划分：`n_nocache = 10 − fixed − offloadable` 个不缓存步、可卸载步、最后是固定步：
+
+- **不缓存步**每步全量重算注意力，不接触任何 KV 槽位。
+- **可卸载步**全部写入槽位 0，随后把 KV 拷贝到各自独立的 CPU 缓冲区（`offload_slot`），下一步再拷贝回来。每个可卸载槽位分配一个 CPU 缓冲区。
+- **固定步**各自写入专属设备槽位；KV 常驻设备，因此最后一个固定步会为下一个流式 chunk 播种缓存。
+
+**Flash Attention 路径。** 启用 `flow_use_flash_attn` 时图只构建一次，通过 `slide_kv_slot` 沿槽位链滑动画图视图。最后一个可卸载步执行从临时槽位到槽位 1 的边界滑动，把 KV 移交给固定链；固定步从不重新绑定，其链位置完全由滑动索引决定。
+
+**非 FA 路径。** 每个缓存步重新构建图，并在构建时显式绑定槽位——可卸载步 `bind_slot(0)`，固定步 `bind_slot(step + slot_offset)`，从而落到各自的专属槽位。
+
+**归一化与裁剪。** 加载时若只有一个可卸载槽位（`offloadable == 1`），会转为固定槽位（`fixed++`、`offloadable = 0`）；两个数值还会被裁剪，保证 `fixed ≤ 10` 且 `fixed + offloadable ≤ 10`。构建器还会为 `offloadable` 分配对应的 CPU KV 缓冲区，用于往返卸载状态。
+
+**缓存长度。** `dit_kv_cache_length` 限制每个槽位保留的最大序列位置数。流式长度超过该值时只直接截断长度、丢弃后面的部分上下文——推理不会崩溃，但音频质量可能下降。
 
 ## cosyvoice_load_from_file_with_params_v3
 
