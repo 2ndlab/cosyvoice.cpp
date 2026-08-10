@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
-project(cosyvoice LANGUAGES C CXX)
+project(cosyvoice VERSION 0.1.1 LANGUAGES C CXX)
 
 # Require 64-bit architecture — this project does not support 32-bit builds.
 if(CMAKE_SIZEOF_VOID_P LESS 8)
@@ -107,6 +107,11 @@ target_include_directories(cosyvoice PRIVATE "vendor/miniaudio" "common")
 if(COSYVOICE_AUDIO_BACKEND STREQUAL "FFMPEG" AND EXISTS "${FFMPEG_PREBUILT_DIR}/include")
     target_include_directories(cosyvoice PRIVATE "${FFMPEG_PREBUILT_DIR}/include")
 endif()
+
+set_target_properties(cosyvoice PROPERTIES
+    VERSION   ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}
+)
 
 # -----------------------------------------------------------------------------
 # Compiler Flags & SIMD Support
