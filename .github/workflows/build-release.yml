@@ -213,8 +213,9 @@ jobs:
                 if [ -d "$BUILD_DIR/bin/Release" ]; then BIN_DIR="$BUILD_DIR/bin/Release"; else BIN_DIR="$BUILD_DIR/bin"; fi
                 if [ -d "$BUILD_DIR/lib/Release" ]; then LIB_DIR="$BUILD_DIR/lib/Release"; else LIB_DIR="$BUILD_DIR/lib"; fi
                 
-                cp -r "$BIN_DIR"/* "$DIST_DIR"/ 2>/dev/null || true
-                cp -r "$LIB_DIR"/* "$DIST_DIR"/ 2>/dev/null || true
+                # -a preserves symlinks (e.g. GGML's versioned dylib chain)
+                cp -a "$BIN_DIR"/* "$DIST_DIR"/ 2>/dev/null || true
+                cp -a "$LIB_DIR"/* "$DIST_DIR"/ 2>/dev/null || true
                 
                 # Manually ensure ONNX Runtime is copied if Frontend is ON
                 if [ "$f" == "ON" ]; then

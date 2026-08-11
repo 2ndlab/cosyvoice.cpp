@@ -493,8 +493,9 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
         hift.f0_predictor.condnet_6.output_length(
             hift.f0_predictor.condnet_4.output_length(
                 hift.f0_predictor.condnet_2.output_length(
-                    hift.f0_predictor.condnet_0.output_length(full_len - prompt->prompt_speech_feat.shape[0],
+                    hift.f0_predictor.condnet_0.output_length(speech_feat->ne[0],
                         finalize), true), true), true), true) * hift.scale_factor * noise->ne[0]);
+    noise_req = std::max(noise_req, noise_len);
     noise_buffer = shared->noise_callback(COSYVOICE_NOISE_CALLBACK_STAGE_BEFORE_HIFT, noise_req, nullptr, shared->noise_callback_ctx);
     ggml_backend_tensor_set_async(backend.get(), noise, noise_buffer + noise_req - noise_len, 0, noise->nb[2]);
 
