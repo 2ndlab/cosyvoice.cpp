@@ -1,13 +1,84 @@
-#include "cosyvoice-internal.h"
+﻿#include "cosyvoice-internal.h"
 #include "cosyvoice-text-chunk.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <string_view>
 #include <vector>
 
 constexpr uint32_t COSYVOICE_TTS_FLAG_MASK = COSYVOICE_TTS_FLAG_TEXT_NORMALIZATION | COSYVOICE_TTS_FLAG_SPLIT_TEXT | COSYVOICE_TTS_FLAG_FAST_SPLIT | COSYVOICE_TTS_FLAG_FADE_IN;
 constexpr double COSYVOICE_TTS_FADE_IN_SECONDS = 0.02;
+
+static constexpr bool is_emoji_cp(uint32_t cp)
+{
+    if (cp >= 0x1F000 && cp <= 0x1FAFF) return true; // Emoji blocks
+    if (cp >= 0x2600 && cp <= 0x27BF) return true;   // Miscellaneous Symbols, Dingbats
+    if (cp >= 0x2B00 && cp <= 0x2BFF) return true;   // Miscellaneous Symbols and Arrows
+    if ((cp >= 0x231A && cp <= 0x231B) // ⌚ ⌛
+        || (cp >= 0x23E9 && cp <= 0x23EC) // ⏩ ⏪ ⏫ ⏬
+        || cp == 0x23F0 || cp == 0x23F3 || (cp >= 0x23F8 && cp <= 0x23FA)) return true;
+    if (cp == 0x25AA || cp == 0x25AB || cp == 0x25B6 || cp == 0x25C0
+        || (cp >= 0x25FB && cp <= 0x25FE)) return true; // ▪ ▫ ▶ ◀ ◻ ◼ ◽ ◾
+    if (cp >= 0x1F1E6 && cp <= 0x1F1FF) return true; // Regional indicator symbols (flag emoji)
+    if (cp >= 0x1F3FB && cp <= 0x1F3FF) return true; // Emoji modifiers (skin tones)
+    if (cp == 0xFE0F) return true;                   // Variation selector-16 (emoji presentation)
+    return false;
+}
+
+static uint32_t decode_utf8_cp(std::string_view text, std::size_t i, std::size_t& len)
+{
+    const auto b0 = static_cast<unsigned char>(text[i]);
+    if ((b0 & 0x80) == 0) { len = 1; return b0; }
+    if ((b0 & 0xE0) == 0xC0) len = 2;
+    else if ((b0 & 0xF0) == 0xE0) len = 3;
+    else if ((b0 & 0xF8) == 0xF0) len = 4;
+    else { len = 1; return b0; }
+    if (i + len > text.size()) { len = 1; return b0; }
+    for (std::size_t k = 1; k < len; ++k)
+        if ((static_cast<unsigned char>(text[i + k]) & 0xC0) != 0x80) { len = 1; return b0; }
+    uint32_t cp = b0 & (0x7F >> len);
+    for (std::size_t k = 1; k < len; ++k)
+        cp = (cp << 6) | (static_cast<unsigned char>(text[i + k]) & 0x3F);
+    return cp;
+}
+
+static inline bool strip_emoji(std::string_view text, std::string& result)
+{
+    result.reserve(text.size());
+    bool removed = false;
+    bool prev_emoji = false;
+    std::size_t i = 0;
+    while (i < text.size())
+    {
+        std::size_t len = 0;
+        const uint32_t cp = decode_utf8_cp(text, i, len);
+        bool drop = is_emoji_cp(cp);
+        if (!drop && (cp == 0x200D || cp == 0x20E3) && prev_emoji) // ZWJ / keycap combining mark inside an emoji sequence
+            drop = true;
+        if (!drop && (cp == 0x00A9 || cp == 0x00AE || cp == 0x2122) && i + len < text.size()) // ©️ ®️ ™️
+        {
+            std::size_t next_len = 0;
+            if (decode_utf8_cp(text, i + len, next_len) == 0xFE0F)
+            {
+                drop = true;
+                len += next_len;
+            }
+        }
+        if (drop)
+        {
+            removed = true;
+            prev_emoji = true;
+            i += len;
+            continue;
+        }
+        prev_emoji = false;
+        result.append(text, i, len);
+        i += len;
+    }
+
+    return removed;
+}
 
 struct cosyvoice_tts_context : cosyvoice_tokenization_result_impl, cosyvoice_prompt, std::string
 {
@@ -44,10 +115,12 @@ struct cosyvoice_tts_context : cosyvoice_tokenization_result_impl, cosyvoice_pro
             mode,
             instruction_cache.c_str());
 
-        bool normalized = false;
-        if (flags & COSYVOICE_TTS_FLAG_TEXT_NORMALIZATION)
-            normalized = cosyvoice_frontend_util_text_normalize(*this, text, static_cast<uint32_t>(strlen(text)), nullptr);
-        const char* effective_text = normalized ? c_str() : text;
+        // Remove all emoji from the synthesis text.
+        auto effective_text = strip_emoji(text, *this) ? c_str() : text;
+
+        if (flags & COSYVOICE_TTS_FLAG_TEXT_NORMALIZATION
+            && cosyvoice_frontend_util_text_normalize(*this, effective_text, static_cast<uint32_t>(strlen(effective_text)), nullptr))
+            effective_text = c_str();
 
         // When splitting is disabled, do a single tokenize+synthesize pass.
         if (!(flags & COSYVOICE_TTS_FLAG_SPLIT_TEXT))
