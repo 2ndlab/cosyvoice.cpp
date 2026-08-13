@@ -226,8 +226,6 @@ struct cosyvoice_tts_context : cosyvoice_tokenization_result_impl, cosyvoice_pro
     {
         bool ok;
         if (flags & COSYVOICE_TTS_FLAG_FADE_IN)
-            ok = cosyvoice_tts_stream(ctx, token_ids, n_tokens, speed, this, callback, user_data);
-        else
         {
             struct callback_wrapper_context
             {
@@ -254,6 +252,8 @@ struct cosyvoice_tts_context : cosyvoice_tokenization_result_impl, cosyvoice_pro
             };
             ok = cosyvoice_tts_stream(ctx, token_ids, n_tokens, speed, this, callback_wrapper, &cb_ctx);
         }
+        else
+            ok = cosyvoice_tts_stream(ctx, token_ids, n_tokens, speed, this, callback, user_data);
 
         return ok;
     }
