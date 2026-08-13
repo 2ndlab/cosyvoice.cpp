@@ -222,6 +222,15 @@ jobs:
                   rm -f "$DIST_DIR"/libonnxruntime*
                   cp -a "$SHARED_DEPS"/onnxruntime/lib/libonnxruntime*.so* "$DIST_DIR"/ 2>/dev/null || true
                   cp -a "$SHARED_DEPS"/onnxruntime/lib/libonnxruntime*.dylib* "$DIST_DIR"/ 2>/dev/null || true
+                  # Drop ONNX Runtime debug-symbol bundles — large, not needed at runtime
+                  find "$DIST_DIR" -name "*.dylib.dSYM" -type d -exec rm -rf {} + 2>/dev/null || true
+                  # Upstream ORT macOS release ships the unversioned dylib as a duplicate real
+                  # file; replace it with a symlink to the versioned one (runtime only uses
+                  # libonnxruntime.1.dylib via its install name)
+                  if [ -f "$DIST_DIR/libonnxruntime.dylib" ] && [ -e "$DIST_DIR/libonnxruntime.1.dylib" ]; then
+                    rm -f "$DIST_DIR/libonnxruntime.dylib"
+                    ln -sfn libonnxruntime.1.dylib "$DIST_DIR/libonnxruntime.dylib"
+                  fi
                 fi
                 
                 # Clean up specific files
