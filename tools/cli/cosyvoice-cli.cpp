@@ -493,6 +493,16 @@ public:
     {
     }
 
+    ~loading_spinner()
+    {
+        if (!enabled)
+            return;
+
+        running = false;
+        if (worker.joinable())
+            worker.join();
+    }
+
     void start()
     {
         if (!enabled)
