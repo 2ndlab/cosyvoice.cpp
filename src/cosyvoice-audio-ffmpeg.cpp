@@ -71,10 +71,12 @@ static AVSampleFormat pick_sample_format(const AVCodec* codec, AVSampleFormat pr
 {
     if (codec)
     {
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(61, 5, 100)
         const AVSampleFormat* configs = nullptr;
         int num_configs = 0;
         if (avcodec_get_supported_config(nullptr, codec, AV_CODEC_CONFIG_SAMPLE_FORMAT, 0,
-            reinterpret_cast<const void**>(&configs), &num_configs) >= 0)
+                                         reinterpret_cast<const void**>(&configs), &num_configs) >= 0
+            && configs)
         {
             for (int i = 0; i < num_configs; ++i)
                 if (configs[i] == preferred) return configs[i];
@@ -84,6 +86,18 @@ static AVSampleFormat pick_sample_format(const AVCodec* codec, AVSampleFormat pr
                 if (configs[i] == AV_SAMPLE_FMT_FLT) return configs[i];
             return configs[0];
         }
+#else
+        if (codec->sample_fmts)
+        {
+            for (const AVSampleFormat* fmt = codec->sample_fmts; *fmt != AV_SAMPLE_FMT_NONE; ++fmt)
+                if (*fmt == preferred) return *fmt;
+            for (const AVSampleFormat* fmt = codec->sample_fmts; *fmt != AV_SAMPLE_FMT_NONE; ++fmt)
+                if (*fmt == AV_SAMPLE_FMT_FLTP) return *fmt;
+            for (const AVSampleFormat* fmt = codec->sample_fmts; *fmt != AV_SAMPLE_FMT_NONE; ++fmt)
+                if (*fmt == AV_SAMPLE_FMT_FLT) return *fmt;
+            return codec->sample_fmts[0];
+        }
+#endif
     }
     return preferred;
 }
