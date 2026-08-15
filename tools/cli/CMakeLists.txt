@@ -17,6 +17,10 @@ add_executable(cosyvoice-cli ${CLI_SOURCES})
 target_link_libraries(cosyvoice-cli PRIVATE cosyvoice common tools_common ggml)
 target_link_libraries(cosyvoice-cli PRIVATE)
 
+if(NOT MSVC)
+    target_compile_options(cosyvoice-cli PRIVATE -Wno-dangling-else)
+endif()
+
 if(NOT _COSYVOICE_CLI_NO_PLAYBACK)
     target_include_directories(cosyvoice-cli PRIVATE "${PROJECT_SOURCE_DIR}/vendor/miniaudio")
 endif()

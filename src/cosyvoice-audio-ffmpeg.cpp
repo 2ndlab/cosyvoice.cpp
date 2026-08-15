@@ -5,7 +5,6 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
-#include <libavutil/opt.h>
 #include <libswresample/swresample.h>
 }
 
@@ -70,21 +69,35 @@ static int64_t seek_packet(void* opaque, int64_t offset, int whence)
 
 static AVSampleFormat pick_sample_format(const AVCodec* codec, AVSampleFormat preferred)
 {
-    if (codec && codec->sample_fmts)
+    if (codec)
     {
-        for (const AVSampleFormat* fmt = codec->sample_fmts; *fmt != AV_SAMPLE_FMT_NONE; ++fmt)
+#if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(61, 5, 100)
+        const AVSampleFormat* configs = nullptr;
+        int num_configs = 0;
+        if (avcodec_get_supported_config(nullptr, codec, AV_CODEC_CONFIG_SAMPLE_FORMAT, 0,
+                                         reinterpret_cast<const void**>(&configs), &num_configs) >= 0
+            && configs)
         {
-            if (*fmt == preferred) return *fmt;
+            for (int i = 0; i < num_configs; ++i)
+                if (configs[i] == preferred) return configs[i];
+            for (int i = 0; i < num_configs; ++i)
+                if (configs[i] == AV_SAMPLE_FMT_FLTP) return configs[i];
+            for (int i = 0; i < num_configs; ++i)
+                if (configs[i] == AV_SAMPLE_FMT_FLT) return configs[i];
+            return configs[0];
         }
-        for (const AVSampleFormat* fmt = codec->sample_fmts; *fmt != AV_SAMPLE_FMT_NONE; ++fmt)
+#else
+        if (codec->sample_fmts)
         {
-            if (*fmt == AV_SAMPLE_FMT_FLTP) return *fmt;
+            for (const AVSampleFormat* fmt = codec->sample_fmts; *fmt != AV_SAMPLE_FMT_NONE; ++fmt)
+                if (*fmt == preferred) return *fmt;
+            for (const AVSampleFormat* fmt = codec->sample_fmts; *fmt != AV_SAMPLE_FMT_NONE; ++fmt)
+                if (*fmt == AV_SAMPLE_FMT_FLTP) return *fmt;
+            for (const AVSampleFormat* fmt = codec->sample_fmts; *fmt != AV_SAMPLE_FMT_NONE; ++fmt)
+                if (*fmt == AV_SAMPLE_FMT_FLT) return *fmt;
+            return codec->sample_fmts[0];
         }
-        for (const AVSampleFormat* fmt = codec->sample_fmts; *fmt != AV_SAMPLE_FMT_NONE; ++fmt)
-        {
-            if (*fmt == AV_SAMPLE_FMT_FLT) return *fmt;
-        }
-        return codec->sample_fmts[0];
+#endif
     }
     return preferred;
 }
@@ -271,15 +284,10 @@ struct ffmpeg_encode_session
 
         if (codec->sample_fmt != AV_SAMPLE_FMT_FLT)
         {
-            swr = swr_alloc();
-            if (!swr) return false;
             AVChannelLayout mono = AV_CHANNEL_LAYOUT_MONO;
-            av_opt_set_chlayout(swr, "in_chlayout", &mono, 0);
-            av_opt_set_chlayout(swr, "out_chlayout", &codec->ch_layout, 0);
-            av_opt_set_int(swr, "in_sample_rate", sample_rate, 0);
-            av_opt_set_int(swr, "out_sample_rate", sample_rate, 0);
-            av_opt_set_sample_fmt(swr, "in_sample_fmt", AV_SAMPLE_FMT_FLT, 0);
-            av_opt_set_sample_fmt(swr, "out_sample_fmt", codec->sample_fmt, 0);
+            if (swr_alloc_set_opts2(&swr, &codec->ch_layout, codec->sample_fmt, codec->sample_rate,
+                                    &mono, AV_SAMPLE_FMT_FLT, sample_rate, 0, nullptr) < 0)
+                return false;
             if (swr_init(swr) < 0)
                 return false;
         }
@@ -554,19 +562,15 @@ bool cosyvoice_audio_load_from_file(const char* filename, float** data, uint32_t
 
         *sample_rate = codec_ctx->sample_rate;
 
-        swr_ctx = swr_alloc();
-        if (!swr_ctx)
-            throw std::runtime_error("Failed to allocate resampler");
-
-        AVChannelLayout mono = AV_CHANNEL_LAYOUT_MONO;
-        av_opt_set_chlayout(swr_ctx, "in_chlayout", &codec_ctx->ch_layout, 0);
-        av_opt_set_chlayout(swr_ctx, "out_chlayout", &mono, 0);
-        av_opt_set_int(swr_ctx, "in_sample_rate", codec_ctx->sample_rate, 0);
-        av_opt_set_int(swr_ctx, "out_sample_rate", codec_ctx->sample_rate, 0);
-        av_opt_set_sample_fmt(swr_ctx, "in_sample_fmt", codec_ctx->sample_fmt, 0);
-        av_opt_set_sample_fmt(swr_ctx, "out_sample_fmt", AV_SAMPLE_FMT_FLT, 0);
-        if (swr_init(swr_ctx) < 0)
-            throw std::runtime_error("Failed to initialize resampler");
+        {
+            AVChannelLayout mono = AV_CHANNEL_LAYOUT_MONO;
+            if (swr_alloc_set_opts2(&swr_ctx, &mono, AV_SAMPLE_FMT_FLT, codec_ctx->sample_rate,
+                                    &codec_ctx->ch_layout, codec_ctx->sample_fmt, codec_ctx->sample_rate,
+                                    0, nullptr) < 0)
+                throw std::runtime_error("Failed to allocate resampler");
+            if (swr_init(swr_ctx) < 0)
+                throw std::runtime_error("Failed to initialize resampler");
+        }
 
         frame = av_frame_alloc();
         pkt = av_packet_alloc();
@@ -646,17 +650,12 @@ bool cosyvoice_audio_resample(const float* input, uint32_t input_length, uint32_
 {
     if (!input || !output || !output_length) return false;
 
-    SwrContext* swr_ctx = swr_alloc();
-    if (!swr_ctx) return false;
+    SwrContext* swr_ctx = nullptr;
 
     AVChannelLayout mono = AV_CHANNEL_LAYOUT_MONO;
-    av_opt_set_chlayout(swr_ctx, "in_chlayout", &mono, 0);
-    av_opt_set_chlayout(swr_ctx, "out_chlayout", &mono, 0);
-    av_opt_set_int(swr_ctx, "in_sample_rate", input_sample_rate, 0);
-    av_opt_set_int(swr_ctx, "out_sample_rate", output_sample_rate, 0);
-    av_opt_set_sample_fmt(swr_ctx, "in_sample_fmt", AV_SAMPLE_FMT_FLT, 0);
-    av_opt_set_sample_fmt(swr_ctx, "out_sample_fmt", AV_SAMPLE_FMT_FLT, 0);
-
+    if (swr_alloc_set_opts2(&swr_ctx, &mono, AV_SAMPLE_FMT_FLT, output_sample_rate,
+                            &mono, AV_SAMPLE_FMT_FLT, input_sample_rate, 0, nullptr) < 0)
+        return false;
     if (swr_init(swr_ctx) < 0)
     {
         swr_free(&swr_ctx);
@@ -679,7 +678,7 @@ bool cosyvoice_audio_resample(const float* input, uint32_t input_length, uint32_
     int total_converted = converted;
     for (;;)
     {
-		out_planes[0] += converted * sizeof(float);
+        out_planes[0] += converted * sizeof(float);
         converted = swr_convert(swr_ctx, out_planes, max_out_samples - total_converted, nullptr, 0);
         if (converted > 0)
             total_converted += converted;
@@ -933,26 +932,20 @@ bool cosyvoice_audio_decoder_decode(
 
     decoder->sample_rate = codec_ctx->sample_rate;
 
-    swr_ctx = swr_alloc();
-    if (!swr_ctx)
-    {
-        cleanup();
-        return false;
-    }
-
     {
         AVChannelLayout mono = AV_CHANNEL_LAYOUT_MONO;
-        av_opt_set_chlayout(swr_ctx, "in_chlayout", &codec_ctx->ch_layout, 0);
-        av_opt_set_chlayout(swr_ctx, "out_chlayout", &mono, 0);
-        av_opt_set_int(swr_ctx, "in_sample_rate", codec_ctx->sample_rate, 0);
-        av_opt_set_int(swr_ctx, "out_sample_rate", codec_ctx->sample_rate, 0);
-        av_opt_set_sample_fmt(swr_ctx, "in_sample_fmt", codec_ctx->sample_fmt, 0);
-        av_opt_set_sample_fmt(swr_ctx, "out_sample_fmt", AV_SAMPLE_FMT_FLT, 0);
-    }
-    if (swr_init(swr_ctx) < 0)
-    {
-        cleanup();
-        return false;
+        if (swr_alloc_set_opts2(&swr_ctx, &mono, AV_SAMPLE_FMT_FLT, codec_ctx->sample_rate,
+                                &codec_ctx->ch_layout, codec_ctx->sample_fmt, codec_ctx->sample_rate,
+                                0, nullptr) < 0)
+        {
+            cleanup();
+            return false;
+        }
+        if (swr_init(swr_ctx) < 0)
+        {
+            cleanup();
+            return false;
+        }
     }
 
     frame = av_frame_alloc();

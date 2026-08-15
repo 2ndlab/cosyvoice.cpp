@@ -102,6 +102,16 @@ endif()
 add_library(cosyvoice ${COSYVOICE_SOURCES})
 target_link_libraries(cosyvoice PRIVATE common ${OBJECT_LIBS})
 
+# Silence clang/GCC warnings (-Wdangling-else from -Wall, -Wimplicit-fallthrough
+# from -Wextra, -Wswitch / -Wnontrivial-memcall) for the cosyvoice library sources only.
+if(NOT MSVC)
+    target_compile_options(cosyvoice PRIVATE -Wno-dangling-else -Wno-implicit-fallthrough -Wno-switch -Wno-nontrivial-memcall)
+    target_compile_options(cosyvoice-frontend-text-norm PRIVATE -Wno-dangling-else -Wno-implicit-fallthrough -Wno-switch -Wno-nontrivial-memcall)
+    if(TARGET cosyvoice-frontend)
+        target_compile_options(cosyvoice-frontend PRIVATE -Wno-dangling-else -Wno-implicit-fallthrough -Wno-switch -Wno-nontrivial-memcall)
+    endif()
+endif()
+
 target_include_directories(cosyvoice PUBLIC "include")
 target_include_directories(cosyvoice PRIVATE "vendor/miniaudio" "common")
 if(COSYVOICE_AUDIO_BACKEND STREQUAL "FFMPEG" AND EXISTS "${FFMPEG_PREBUILT_DIR}/include")
