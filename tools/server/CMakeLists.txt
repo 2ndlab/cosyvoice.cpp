@@ -23,6 +23,9 @@ set(SERVER_COMMON_LIBS cosyvoice common ggml tools_common)
 option(COSYVOICE_SERVER_NO_WEBUI
     "Disable embedded WebUI in cosyvoice-server (removes C23 #embed dependency)" OFF)
 
+option(COSYVOICE_USE_PCH
+    "Force use of precompiled headers instead of C++20 modules" OFF)
+
 set(COSYVOICE_SERVER_DEFAULT_MODE "WEBUI" CACHE STRING
     "Default server mode when neither --api nor --webui is given (WEBUI or API)")
 
@@ -57,8 +60,14 @@ endif()
 set(_use_modules TRUE)
 set(_fallback_reason "")
 
+# COSYVOICE_USE_PCH forces the precompiled-header path regardless of module support
+if(COSYVOICE_USE_PCH)
+    set(_use_modules FALSE)
+    set(_fallback_reason "COSYVOICE_USE_PCH is enabled")
+endif()
+
 # Makefile-based generators do not support module scanning
-if(CMAKE_GENERATOR MATCHES "Makefiles$|^NMake")
+if(_use_modules AND CMAKE_GENERATOR MATCHES "Makefiles$|^NMake")
     set(_use_modules FALSE)
     set(_fallback_reason "${CMAKE_GENERATOR} does not support module scanning")
 endif()
