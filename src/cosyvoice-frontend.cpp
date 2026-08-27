@@ -3,16 +3,7 @@
 #include "cosyvoice-audio.h"
 #include "fft.h"
 #include "common.h"
-
-#if defined(__x86_64__) || defined(_M_X64)
-#include <immintrin.h>
-#elif defined(__aarch64__) || defined(_M_ARM64)
-#define SIMDE_ENABLE_NATIVE_ALIASES
-#include <simde/x86/avx2.h>
-#include <simde/x86/fma.h>
-#else
-#error "src/cosyvoice-frontend.cpp requires x86_64 or ARM64 SIMD support"
-#endif
+#include "simd-math.h"
 
 #include <onnxruntime_cxx_api.h>
 
@@ -242,22 +233,20 @@ matrix cosyvoice_frontend_context::extract_speech_feat(float* speech, uint32_t l
     len = mel.shape[0] * mel.shape[1];
     auto mel_cur = mel.data;
     auto mel_end = mel_cur + len;
-#ifdef _MSC_VER
     for (__m256 min_level = _mm256_set1_ps(1e-5f); mel_cur + 7 < mel_end; mel_cur += 8)
     {
         __m256 values = _mm256_loadu_ps(mel_cur);
         values = _mm256_max_ps(values, min_level);
-        values = _mm256_log_ps(values);
+        values = simd_log_ps(values);
         _mm256_storeu_ps(mel_cur, values);
     }
     for (__m128 min_level = _mm_set_ps1(1e-5f); mel_cur + 7 < mel_end; mel_cur += 4)
     {
         __m128 values = _mm_loadu_ps(mel_cur);
         values = _mm_max_ps(values, min_level);
-        values = _mm_log_ps(values);
+        values = simd_log_ps(values);
         _mm_storeu_ps(mel_cur, values);
     }
-#endif
     for (mel_end = mel.data + len; mel_cur != mel_end; ++mel_cur)
     {
         auto value = std::log(std::max(1e-5f, *mel_cur));
@@ -380,14 +369,13 @@ tokens_t cosyvoice_frontend_context::extract_speech_token(float* signal, uint32_
     auto mel_dataptr_end = mel_dataptr + len;
     float max_value = 1e-10f;
 
-#ifdef _MSC_VER
     {
         __m256 maximum_256 = _mm256_set1_ps(1e-10f);
         for (__m256 min_level_vec = _mm256_set1_ps(1e-10f); mel_dataptr + 7 < mel_dataptr_end; mel_dataptr += 8)
         {
             __m256 values = _mm256_loadu_ps(mel_dataptr);
             values = _mm256_max_ps(values, min_level_vec);
-            values = _mm256_log10_ps(values);
+            values = simd_log10_ps(values);
             _mm256_storeu_ps(mel_dataptr, values);
             maximum_256 = _mm256_max_ps(maximum_256, values);
         }
@@ -397,7 +385,7 @@ tokens_t cosyvoice_frontend_context::extract_speech_token(float* signal, uint32_
         {
             __m128 values = _mm_loadu_ps(mel_dataptr);
             values = _mm_max_ps(values, min_level_vec);
-            values = _mm_log10_ps(values);
+            values = simd_log10_ps(values);
             _mm_storeu_ps(mel_dataptr, values);
             maximum_128 = _mm_max_ps(maximum_128, values);
         }
@@ -407,7 +395,6 @@ tokens_t cosyvoice_frontend_context::extract_speech_token(float* signal, uint32_
         max_value = std::max(max_value, temp[2]);
         max_value = std::max(temp[3], max_value);
     }
-#endif
     for (; mel_dataptr != mel_dataptr_end; ++mel_dataptr)
     {
         auto value = std::log10(std::max(1e-10f, *mel_dataptr));

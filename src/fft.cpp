@@ -3,15 +3,7 @@
 #include "ggml-cpu-flag.h"
 
 #include <math.h>
-#if defined(__x86_64__) || defined(_M_X64)
-#include <immintrin.h>
-#elif defined(__aarch64__) || defined(_M_ARM64)
-#define SIMDE_ENABLE_NATIVE_ALIASES
-#include <simde/x86/avx2.h>
-#include <simde/x86/fma.h>
-#else
-#error "src/fft.cpp requires x86_64 SIMD intrinsics or SIMDe on ARM64; unsupported architecture"
-#endif
+#include "simd-math.h"
 
 #include <cstring>
 #include <atomic>
@@ -958,7 +950,6 @@ fft_context::fft_context(int nfft) : nfft(nfft), idx(0), workers(0), twiddles_r(
     int i = 0;
     constexpr float pi = 3.1415926535897932f;
     const float factor = -2 * pi / nfft;
-#ifdef _MSC_VER
     {
         const __m256 factor256 = _mm256_set1_ps(factor);
         __m256 _8 = _mm256_set1_ps(8.f);
@@ -968,10 +959,10 @@ fft_context::fft_context(int nfft) : nfft(nfft), idx(0), workers(0), twiddles_r(
             __m256 phase = _mm256_mul_ps(base, factor256);
             base = _mm256_add_ps(base, _8);
 
-            __m256 v = _mm256_cos_ps(phase);
+            __m256 v = simd_cos_ps(phase);
             _mm256_storeu_ps(twiddles_r.get() + i, v);
 
-            v = _mm256_sin_ps(phase);
+            v = simd_sin_ps(phase);
             _mm256_storeu_ps(twiddles_i + i, v);
         }
     }
@@ -984,14 +975,13 @@ fft_context::fft_context(int nfft) : nfft(nfft), idx(0), workers(0), twiddles_r(
             __m128 phase = _mm_mul_ps(base, factor128);
             base = _mm_add_ps(base, _4);
 
-            __m128 v = _mm_cos_ps(phase);
+            __m128 v = simd_cos_ps(phase);
             _mm_storeu_ps(twiddles_r.get() + i, v);
 
-            v = _mm_sin_ps(phase);
+            v = simd_sin_ps(phase);
             _mm_storeu_ps(twiddles_i + i, v);
         }
     }
-#endif
     for (; i < nfft; ++i)
     {
         float phase = factor * i;
