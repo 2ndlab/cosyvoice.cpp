@@ -1,14 +1,16 @@
 #pragma once
 
 #if defined(__x86_64__) || defined(_M_X64)
-#include <immintrin.h>
-#elif defined(__aarch64__) || defined(_M_ARM64)
-#define SIMDE_ENABLE_NATIVE_ALIASES
-#include <simde/x86/avx2.h>
-#include <simde/x86/fma.h>
-#else
-#error "simd-math.h requires x86_64 or ARM64 SIMD support"
+    #ifndef COSYVOICE_NO_SIMD
+        #include <immintrin.h>
+    #endif
+#elif !defined(COSYVOICE_NO_SIMD)
+    #define SIMDE_ENABLE_NATIVE_ALIASES
+    #include <simde/x86/avx2.h>
+    #include <simde/x86/fma.h>
 #endif
+
+#ifndef COSYVOICE_NO_SIMD
 
 inline __m128 simd_log_ps(__m128 x)
 {
@@ -139,3 +141,5 @@ inline __m256 simd_cos_ps(__m256 x)
         _mm256_castps128_ps256(simd_cos_ps(_mm256_castps256_ps128(x))),
         simd_cos_ps(_mm256_extractf128_ps(x, 1)), 1);
 }
+
+#endif
