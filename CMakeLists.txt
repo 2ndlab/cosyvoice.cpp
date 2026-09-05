@@ -59,6 +59,28 @@ add_subdirectory(common)
 # -----------------------------------------------------------------------------
 # Core Library: cosyvoice
 # -----------------------------------------------------------------------------
+# Target-ISA probe: ask the *compiler* (the VS generator lies -- on an ARM64
+# cross build CMAKE_SYSTEM_PROCESSOR still reports the host's "AMD64"). The
+# macros below mirror exactly what the SIMD headers use to gate intrinsics.
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles("#if !defined(__x86_64__) && !defined(_M_X64)\n#error this compiler targets a non-x86 ABI\n#endif\nint main() { return 0; }"
+                          COSYVOICE_TARGET_IS_X86)
+
+# Build-time SIMD inclusion knobs (default: everything on).
+option(COSYVOICE_NO_SIMD "Disable all SIMD; force scalar-only" OFF)
+option(COSYVOICE_HAS_SCALAR "Compile the pure-scalar fallback tier" ON)
+option(COSYVOICE_HAS_SSE42 "Compile the SSE4.2-class SIMD tier" ON)
+option(COSYVOICE_HAS_AVX "Compile the AVX-class SIMD tier" ON)
+option(COSYVOICE_HAS_AVX2 "Compile the AVX2-class SIMD tier" ON)
+option(COSYVOICE_HAS_AVX512 "Compile the AVX-512 (F+BW+DQ) SIMD tier" ON)  # runtime gate additionally requires VL (MSVC dead-branch EVEX.256 encodings)
+
+# The SIMD classes are x86(-64). On non-x86 the SSE4.2+FMA3 class can be built
+# through SIMDe; without SIMDe the build auto-enables COSYVOICE_NO_SIMD (scalar
+# only). The COSYVOICE_HAS_* macros gate every intrinsic block in the sources,
+# so a disabled class is not merely uninstantiated -- it is never parsed.
+# Effective class set after hierarchy enforcement: disabling a lower class
+# (e.g. AVX2) automatically disables everything above it (AVX-512).
+
 file(GLOB COSYVOICE_SOURCES "src/*.cpp" "src/*.h" "include/*.h")
 
 if(COSYVOICE_NO_AUDIO)
@@ -99,6 +121,13 @@ if(NOT COSYVOICE_NO_FRONTEND)
         list(APPEND OBJECT_LIBS cosyvoice-frontend)
 endif()
 
+# simd_detect.cpp is the only definition of g_simd_caps, referenced solely by
+# x86 dispatch -- drop it from the sources when it can never be used (the old
+# in-function REMOVE_ITEM was dead: add_library() had already consumed the list).
+if(COSYVOICE_NO_SIMD OR NOT COSYVOICE_TARGET_IS_X86)
+    list(REMOVE_ITEM COSYVOICE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/simd_detect.cpp")
+endif()
+
 add_library(cosyvoice ${COSYVOICE_SOURCES})
 target_link_libraries(cosyvoice PRIVATE common ${OBJECT_LIBS})
 
@@ -130,39 +159,172 @@ if(NOT MSVC)
     add_compile_definitions("$<$<CONFIG:Debug>:_DEBUG>")
 endif()
 
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        set(SIMD_FLAGS "-mavx" "-mavx2" "-mfma")
-        
-        target_compile_options(cosyvoice PRIVATE ${SIMD_FLAGS})
-        
-        if(TARGET cosyvoice-frontend)
-            target_compile_options(cosyvoice-frontend PRIVATE ${SIMD_FLAGS})
-        endif()
-    endif()
-elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
-    # ARM: Use SIMDe (SIMD Everywhere) for AVX2/FMA→NEON translation.
-    # Install SIMDe via your package manager (e.g. `brew install simde`)
-    # or place headers under vendor/simde/.
-    find_path(SIMDE_INCLUDE_DIR NAMES simde/x86/avx2.h
+# -----------------------------------------------------------------------------
+# Effective SIMD classes. COSYVOICE_HAS_* cache options request a class; the
+# build platform decides what actually exists:
+#   x86:            user cache options, cascaded (AVX needs SSE4.2 class, ...).
+#   non-x86+SIMDe:  SSE4.2+FMA3 class only (SIMDe emulation); nothing else.
+#   non-x86 no SIMDe: COSYVOICE_NO_SIMD is auto-enabled -> scalar only. All the
+#                   intrinsics-dependent code is #ifdef'd out in this case, so
+#                   no SIMDe declarations are required anywhere.
+# The _EFF_* variables below are the single source of truth for the tier
+# targets and the COSYVOICE_HAS_* compile definitions.
+# -----------------------------------------------------------------------------
+if(NOT COSYVOICE_TARGET_IS_X86)
+    find_path(SIMDE_INCLUDE_DIR NAMES simde/x86/sse4.2.h
               HINTS /opt/homebrew/include /usr/local/include /usr/include
                     "${CMAKE_CURRENT_SOURCE_DIR}/vendor/simde")
-    if(SIMDE_INCLUDE_DIR)
-        message(STATUS "SIMDe found: ${SIMDE_INCLUDE_DIR}")
-        target_include_directories(cosyvoice SYSTEM PRIVATE ${SIMDE_INCLUDE_DIR})
-        if(TARGET cosyvoice-frontend)
-            target_include_directories(cosyvoice-frontend SYSTEM PRIVATE ${SIMDE_INCLUDE_DIR})
-        endif()
-        if(TARGET cosyvoice-frontend-text-norm)
-            target_include_directories(cosyvoice-frontend-text-norm SYSTEM PRIVATE ${SIMDE_INCLUDE_DIR})
-        endif()
-    else()
-        message(FATAL_ERROR
-                "SIMDe is required on ARM64 because AVX2 intrinsics in cosyvoice-frontend and fft "
-                "unconditionally include SIMDe headers. Install SIMDe or set SIMDE_INCLUDE_DIR to "
-                "the directory containing the top-level 'simde/' folder.")
+    # An auto-enabled scalar fallback is cleared as soon as SIMDe shows up.
+    if(COSYVOICE_NO_SIMD AND COSYVOICE_NO_SIMD_AUTO AND SIMDE_INCLUDE_DIR)
+        set(COSYVOICE_NO_SIMD OFF CACHE BOOL "" FORCE)
+        set(COSYVOICE_NO_SIMD_AUTO OFF CACHE BOOL "" FORCE)
+    elseif(COSYVOICE_NO_SIMD AND NOT SIMDE_INCLUDE_DIR)
+        # user-requested or stale auto -- both fine, scalar only
+    elseif(NOT SIMDE_INCLUDE_DIR)
+        set(COSYVOICE_NO_SIMD ON CACHE BOOL "" FORCE)
+        set(COSYVOICE_NO_SIMD_AUTO ON CACHE BOOL "internal: NO_SIMD auto-set (non-x86, no SIMDe)" FORCE)
+        message(STATUS "cosyvoice: non-x86 target without SIMDe -> SIMD auto-disabled "
+                       "(scalar-only; define SIMDE_INCLUDE_DIR to get the SSE4.2+FMA3 tier)")
     endif()
 endif()
+
+if(COSYVOICE_NO_SIMD)
+    set(_EFF_SSE42 OFF)
+    set(_EFF_AVX   OFF)
+    set(_EFF_AVX2  OFF)
+    set(_EFF_512   OFF)
+elseif(NOT COSYVOICE_TARGET_IS_X86)
+    set(_EFF_SSE42 ON)
+    set(_EFF_AVX   OFF)
+    set(_EFF_AVX2  OFF)
+    set(_EFF_512   OFF)
+else()
+    set(_EFF_SSE42 ${COSYVOICE_HAS_SSE42})
+    set(_EFF_AVX   ${COSYVOICE_HAS_AVX})
+    set(_EFF_AVX2  ${COSYVOICE_HAS_AVX2})
+    set(_EFF_512   ${COSYVOICE_HAS_AVX512})
+    if(NOT _EFF_SSE42)
+        set(_EFF_AVX OFF)
+        set(_EFF_AVX2 OFF)
+        set(_EFF_512 OFF)
+    elseif(NOT _EFF_AVX)
+        set(_EFF_AVX2 OFF)
+        set(_EFF_512 OFF)
+    elseif(NOT _EFF_AVX2)
+        set(_EFF_512 OFF)
+    endif()
+endif()
+
+# Apply the SIMD compile definitions (+ SIMDe on non-x86) to one library target.
+function(cosyvoice_apply_simd TARGET_NAME)
+    if(NOT TARGET ${TARGET_NAME})
+        return()
+    endif()
+
+    # Under COSYVOICE_NO_SIMD nothing else is defined: every SIMD helper/body
+    # region, including the dependent-call sites, is #ifdef'd out.
+    if(COSYVOICE_NO_SIMD)
+        target_compile_definitions(${TARGET_NAME} PRIVATE COSYVOICE_NO_SIMD)
+        return()
+    endif()
+
+    # Presence semantics: a class is compiled in iff its COSYVOICE_HAS_* macro is
+    # defined; disabled classes are simply NOT defined -- the kernel bodies and
+    # dispatch branches then do not exist (preprocessor), so platforms without
+    # the intrinsics (non-x86, no SIMDe) never name them.
+    if(COSYVOICE_HAS_SCALAR)
+        target_compile_definitions(${TARGET_NAME} PRIVATE COSYVOICE_HAS_SCALAR)
+    endif()
+
+    if(_EFF_SSE42)
+        target_compile_definitions(${TARGET_NAME} PRIVATE COSYVOICE_HAS_SSE42)
+    endif()
+    if(_EFF_AVX)
+        target_compile_definitions(${TARGET_NAME} PRIVATE COSYVOICE_HAS_AVX)
+    endif()
+    if(_EFF_AVX2)
+        target_compile_definitions(${TARGET_NAME} PRIVATE COSYVOICE_HAS_AVX2)
+    endif()
+    if(_EFF_512)
+        target_compile_definitions(${TARGET_NAME} PRIVATE COSYVOICE_HAS_AVX512)
+    endif()
+
+    # Non-x86 (SSE4.2+FMA3 class): SIMDe provides the intrinsic declarations
+    # the compiled-in bodies reference; guaranteed present here (the scalar
+    # auto-fallback above sets NO_SIMD when it is missing).
+    if(NOT COSYVOICE_TARGET_IS_X86)
+        target_include_directories(${TARGET_NAME} SYSTEM PRIVATE ${SIMDE_INCLUDE_DIR})
+    endif()
+endfunction()
+
+foreach(_SIMD_TARGET cosyvoice cosyvoice-frontend cosyvoice-frontend-text-norm)
+    cosyvoice_apply_simd(${_SIMD_TARGET})
+endforeach()
+
+# -----------------------------------------------------------------------------
+# Per-tier SIMD kernel objects. Each SIMD class is ONE source file built as its
+# own OBJECT library with ONLY that class's ISA flags: -m<isa>... on GNU/Clang,
+# /arch:<isa> on MSVC (>=17.10 provides /arch:SSE4.2; /arch:AVX10.x is likewise
+# available for a future AVX10 tier). Kernel bodies live in
+# simd-kernels-impl.h, which is included solely by these TUs, so every emitted
+# instruction -- intrinsics AND compiler auto-vectorization -- is bounded to the
+# tier's own ISA, while caller TUs stay at the plain SSE2 baseline. The scalar
+# fallback deliberately carries no flags on either toolchain.
+# -----------------------------------------------------------------------------
+set(COSYVOICE_TIER_LIBS "")
+
+# Scalar fallback (simd_none) is the guaranteed tier: build it unconditionally
+# (it is also the dispatch target under COSYVOICE_NO_SIMD), no ISA flags at all.
+add_library(cosyvoice-tier-scalar OBJECT "${CMAKE_CURRENT_SOURCE_DIR}/src/simd/kernels_scalar.cpp")
+list(APPEND COSYVOICE_TIER_LIBS cosyvoice-tier-scalar)
+
+function(add_cosyvoice_simd_tier TIER TIER_SRC FLAGS MSVC_ARCH EFF)
+    if(NOT EFF OR COSYVOICE_NO_SIMD)
+        return()
+    endif()
+    # Non-x86 (SIMDe-emulated tier): no native ISA flags apply.
+    if(NOT COSYVOICE_TARGET_IS_X86)
+        set(FLAGS "")
+        set(MSVC_ARCH "")
+    endif()
+
+    add_library(cosyvoice-tier-${TIER} OBJECT "${TIER_SRC}")
+
+    if(MSVC)
+        if(MSVC_ARCH)
+            target_compile_options(cosyvoice-tier-${TIER} PRIVATE ${MSVC_ARCH})
+        endif()
+    else()
+        if(FLAGS)
+            target_compile_options(cosyvoice-tier-${TIER} PRIVATE ${FLAGS})
+        endif()
+        target_compile_options(cosyvoice-tier-${TIER} PRIVATE
+            -Wno-dangling-else -Wno-implicit-fallthrough -Wno-switch -Wno-nontrivial-memcall)
+    endif()
+
+    list(APPEND COSYVOICE_TIER_LIBS cosyvoice-tier-${TIER})
+    set(COSYVOICE_TIER_LIBS ${COSYVOICE_TIER_LIBS} PARENT_SCOPE)
+endfunction()
+
+add_cosyvoice_simd_tier(sse42   "${CMAKE_CURRENT_SOURCE_DIR}/src/simd/kernels_sse42.cpp"   "-msse4.2" "/arch:SSE4.2" ${_EFF_SSE42})
+add_cosyvoice_simd_tier(avx     "${CMAKE_CURRENT_SOURCE_DIR}/src/simd/kernels_avx.cpp"     "-msse4.2;-mavx" "/arch:AVX" ${_EFF_AVX})
+add_cosyvoice_simd_tier(avx2    "${CMAKE_CURRENT_SOURCE_DIR}/src/simd/kernels_avx2.cpp"    "-msse4.2;-mavx;-mavx2;-mfma" "/arch:AVX2" ${_EFF_AVX2})
+add_cosyvoice_simd_tier(avx512  "${CMAKE_CURRENT_SOURCE_DIR}/src/simd/kernels_avx512.cpp"  "-msse4.2;-mavx;-mavx2;-mfma;-mavx512f;-mavx512bw;-mavx512dq" "/arch:AVX512" ${_EFF_512})
+
+# The callers' unresolved kernel references resolve against these objects when
+# libcosyvoice is linked. Scalar (simd_none) is a tier object too (see above),
+# so every preset -- including the COSYVOICE_NO_SIMD fallback -- is linked in.
+if(COSYVOICE_TIER_LIBS)
+    target_link_libraries(cosyvoice PRIVATE ${COSYVOICE_TIER_LIBS})
+endif()
+
+# Tier TUs include simd-kernels-impl.h / simd-math.h, whose SIMD guards
+# (COSYVOICE_NO_SIMD, the SIMDe includes) key off exactly the same settings as
+# the callers -- so every tier object must receive them too, above all the
+# SIMDe include directory on non-x86 builds.
+foreach(_TIER_TGT IN LISTS COSYVOICE_TIER_LIBS)
+    cosyvoice_apply_simd(${_TIER_TGT})
+endforeach()
 
 if(NOT BUILD_SHARED_LIBS)
     target_compile_definitions(cosyvoice PUBLIC COSYVOICE_STATIC)

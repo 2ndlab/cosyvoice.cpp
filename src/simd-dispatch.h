@@ -1,190 +1,101 @@
 #pragma once
 
-#include "simd-math.h"
+// ---------------------------------------------------------------------------
+// Pure SIMD dispatch: capability struct + presets + runtime tier selection.
+//
+// This header is intentionally free of intrinsic types and SIMD helpers (no
+// <immintrin.h>, no __m*/*, no simd-math.h): caller TUs only need the dispatch
+// logic and must stay unpolluted. All SIMD implementations live in tier-only
+// headers -- simd-math.h (log/sincos) and simd-kernels-impl.h (the kernel
+// bodies + their support helpers) -- included solely by the tier objects.
+//
+// Build-time SIMD inclusion knobs. On x86 each class is optional; on non-x86
+// the SSE4.2+FMA class is emulated via SIMDe if present, and the build
+// auto-falls back to COSYVOICE_NO_SIMD (scalar-only) when SIMDe is missing.
+//   COSYVOICE_NO_SIMD        force scalar-only: no SIMD code at all.
+//   COSYVOICE_HAS_SCALAR     compile the pure-scalar fallback tier (default ON).
+//   COSYVOICE_HAS_SSE42/AVX/AVX2/AVX512  include that class (default ON).
+// Disabling a lower class automatically disables every class that requires it.
+// These macros are load-bearing: the kernel bodies gate every AVX/AVX-512
+// intrinsic block with `#if defined(COSYVOICE_HAS_*)`, so a platform without
+// the intrinsics never parses them (no <immintrin.h>/SIMDe declarations
+// needed). The gates are NOT simply per-class: a lower-class block also IS the
+// vector tail (or even the main loop) of higher presets that fall through to
+// it -- `if constexpr (C.avx)` covers the avx2 preset too, and `C.sse42`
+// covers avx/avx2 -- so those blocks read
+// `HAS_SSE42 || HAS_AVX || HAS_AVX2` / `HAS_AVX || HAS_AVX2` / `HAS_AVX2`.
+// The 512 block stays a lone `HAS_AVX512`: every 512 branch masks its own
+// tail and returns, so nothing below it ever sees the 512 preset.
+// The AVX-512 tier requires F+BW+DQ+VL together (16-bit tail masks need BW's
+// kmovw; sincos' _mm512_test_epi32_mask needs DQ's vptestmd; the compilers
+// themselves emit EVEX xmm16+/ymm16+ spill forms that need VL). A part with
+// only some of them (e.g. Knights Landing: F alone) falls through to AVX2.
+// Every kernel's 512 branch is `if constexpr (C.avx512) {...return;} else
+// {...}`, so lower-tier code is not even instantiated for the 512 preset.
+// ---------------------------------------------------------------------------
 
-#include <cstddef>
+#include <stdexcept>
 #include <utility>
-
-#ifndef COSYVOICE_NO_SIMD
-    #if defined(__x86_64__) || defined(_M_X64)
-        #if defined(_MSC_VER)
-            #include <intrin.h>
-        #else
-            #include <cpuid.h>
-        #endif
-    #endif
-#endif
 
 struct simd_caps
 {
-    bool sse42:1 = false;
-    bool avx  :1 = false;
-    bool fma3 :1 = false;
-    bool avx2 :1 = false;
+    bool sse42    :1 = false;
+    bool avx      :1 = false;
+    bool fma3     :1 = false;
+    bool avx2     :1 = false;
+    bool avx512   :1 = false;   // every AVX-512 sub-set this build requires
+                                //  (F+BW+DQ + OS state saves) is usable; that
+                                //  and only that enables the 512 tier.
 
     bool operator==(const simd_caps&) const = default;
 };
 
-constexpr simd_caps simd_none      { .sse42=false, .avx=false, .fma3=false, .avx2=false };
-constexpr simd_caps simd_sse42     { .sse42=true,  .avx=false, .fma3=false, .avx2=false };
-constexpr simd_caps simd_sse42_fma { .sse42=true,  .avx=false, .fma3=true,  .avx2=false };
-constexpr simd_caps simd_avx       { .sse42=true,  .avx=true,  .fma3=false, .avx2=false };
-constexpr simd_caps simd_avx2      { .sse42=true,  .avx=true,  .fma3=true,  .avx2=true  };
+constexpr simd_caps simd_none       { .sse42=false, .avx=false, .fma3=false, .avx2=false, .avx512=false };
+constexpr simd_caps simd_sse42      { .sse42=true,  .avx=false, .fma3=false, .avx2=false, .avx512=false };
+constexpr simd_caps simd_sse42_fma  { .sse42=true,  .avx=false, .fma3=true,  .avx2=false, .avx512=false };
+constexpr simd_caps simd_avx        { .sse42=true,  .avx=true,  .fma3=false, .avx2=false, .avx512=false };
+constexpr simd_caps simd_avx2       { .sse42=true,  .avx=true,  .fma3=true,  .avx2=true,  .avx512=false };
+constexpr simd_caps simd_avx512     { .sse42=true,  .avx=true,  .fma3=true,  .avx2=true,  .avx512=true  };
 
-#ifndef COSYVOICE_NO_SIMD
-
-inline
-simd_caps simd_detect()
-{
-#   if defined(__x86_64__) || defined(_M_X64)
-    simd_caps caps;
-
-    #if defined(_MSC_VER)
-    int regs[4] = { 0, 0, 0, 0 };
-    __cpuidex(regs, 1, 0);
-    const unsigned ecx1 = static_cast<unsigned>(regs[2]);
-    #else
-    unsigned eax = 0, ebx = 0, ecx = 0, edx = 0;
-    if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx))
-        return caps;
-    const unsigned ecx1 = ecx;
-    #endif
-
-    caps.sse42 = (ecx1 & (1u << 19)) != 0;
-
-    const bool osxsave = (ecx1 & (1u << 27)) != 0;
-    const bool avx_bit = (ecx1 & (1u << 28)) != 0;
-    if (!osxsave || !avx_bit)
-        return caps;
-
-        #if defined(_MSC_VER)
-    const unsigned xcr0 = static_cast<unsigned>(_xgetbv(0));
-        #else
-    unsigned xcr0_lo = 0, xcr0_hi = 0;
-    __asm__ volatile("xgetbv" : "=a"(xcr0_lo), "=d"(xcr0_hi) : "c"(0));
-    const unsigned xcr0 = xcr0_lo;
-        #endif
-    if ((xcr0 & 0x6) != 0x6)
-        return caps;
-
-    caps.avx  = true;
-    caps.fma3 = (ecx1 & (1u << 12)) != 0;
-
-        #if defined(_MSC_VER)
-    __cpuidex(regs, 7, 0);
-    const bool avx2_bit = (static_cast<unsigned>(regs[1]) & (1u << 5)) != 0;
-        #else
-    bool avx2_bit = false;
-    if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx))
-        avx2_bit = (ebx & (1u << 5)) != 0;
-        #endif
-    if (avx2_bit)
-    {
-        caps.avx2  = true;
-        caps.fma3  = true; // no AVX2 hardware lacks FMA3; keeps the avx2 preset self-consistent
-    }
-    return caps;
-    #else
-    return simd_sse42_fma; // ARM64 via SIMDe: 128-bit paths, FMA maps natively to NEON
-    #endif
-}
-
-inline const simd_caps g_simd_caps = simd_detect();
-
+// g_simd_caps is defined by simd_detect.cpp, which is built only on x86 (and
+// only when SIMD is not disabled). The extern is declared under the same
+// conditions so non-x86 callers never reference a missing symbol.
+#if !defined(COSYVOICE_NO_SIMD) && (defined(__x86_64__) || defined(_M_X64))
+extern const simd_caps g_simd_caps;
 #endif
 
-template <template <simd_caps> class Kernel, typename... Args>
+template<template<simd_caps> class Kernel, typename... Args>
 inline
 auto simd_dispatch(Args&&... args)
 {
 #ifdef COSYVOICE_NO_SIMD
     return Kernel<simd_none>::run(std::forward<Args>(args)...);
+#elif !defined(__x86_64__) && !defined(_M_X64)
+    // non-x86: SSE4.2+FMA3 emulated via SIMDe/NEON (in the sse42 tier object).
+    return Kernel<simd_sse42_fma>::run(std::forward<Args>(args)...);
 #else
-    if (g_simd_caps.avx2)
+    // x86: dispatch by detected features, most capable first. No exact-equality
+    // matching: a class the build disabled is simply never selected and the CPU
+    // falls through to the next lower tier that the build did include.
+#if defined(COSYVOICE_HAS_AVX512)
+    if (g_simd_caps.avx512)
+        return Kernel<simd_avx512>::run(std::forward<Args>(args)...);
+#endif
+#if defined(COSYVOICE_HAS_AVX2)
+    if (g_simd_caps.avx2 && g_simd_caps.fma3 && g_simd_caps.sse42)
         return Kernel<simd_avx2>::run(std::forward<Args>(args)...);
-    if (g_simd_caps.avx)
+#endif
+#if defined(COSYVOICE_HAS_AVX)
+    if (g_simd_caps.avx && g_simd_caps.sse42)
         return Kernel<simd_avx>::run(std::forward<Args>(args)...);
+#endif
+#if defined(COSYVOICE_HAS_SSE42)
     if (g_simd_caps.sse42)
         return Kernel<simd_sse42>::run(std::forward<Args>(args)...);
+#endif
+#if defined(COSYVOICE_HAS_SCALAR)
     return Kernel<simd_none>::run(std::forward<Args>(args)...);
 #endif
-}
-
-#ifndef COSYVOICE_NO_SIMD
-
-inline
-float simd_hsum_ps(__m128 v)
-{
-    __m128 dup = _mm_movehdup_ps(v);
-    __m128 sum = _mm_add_ps(v, dup);
-    dup = _mm_movehl_ps(dup, sum);
-    return _mm_cvtss_f32(_mm_add_ss(sum, dup));
-}
-
-template <simd_caps C>
-inline
-__m128 simd_fmadd_ps(__m128 a, __m128 b, __m128 c)
-{
-    if constexpr (C.fma3)
-        return _mm_fmadd_ps(a, b, c);
-    else
-        return _mm_add_ps(c, _mm_mul_ps(a, b));
-}
-
-template <simd_caps C>
-inline
-__m128 simd_fmsub_ps(__m128 a, __m128 b, __m128 c)
-{
-    if constexpr (C.fma3)
-        return _mm_fmsub_ps(a, b, c);
-    else
-        return _mm_sub_ps(_mm_mul_ps(a, b), c);
-}
-
-template <simd_caps C>
-inline
-__m256 simd_fmadd_ps(__m256 a, __m256 b, __m256 c)
-{
-    if constexpr (C.fma3)
-        return _mm256_fmadd_ps(a, b, c);
-    else
-        return _mm256_add_ps(c, _mm256_mul_ps(a, b));
-}
-
-template <simd_caps C>
-inline
-__m256 simd_fmsub_ps(__m256 a, __m256 b, __m256 c)
-{
-    if constexpr (C.fma3)
-        return _mm256_fmsub_ps(a, b, c);
-    else
-        return _mm256_sub_ps(_mm256_mul_ps(a, b), c);
-}
-
-inline
-__m128 simd_load4_strided_ps(const float* base, int stride)
-{
-    return _mm_set_ps(base[3 * stride], base[2 * stride], base[1 * stride], base[0]);
-}
-
-inline
-__m128 simd_load4_indexed_ps(const float* base, const int* idx)
-{
-    return _mm_set_ps(base[idx[3]], base[idx[2]], base[idx[1]], base[idx[0]]);
-}
-
-inline
-__m256 simd_load8_strided_ps(const float* base, int stride)
-{
-    return _mm256_setr_ps(base[0], base[stride], base[2 * stride], base[3 * stride],
-        base[4 * stride], base[5 * stride], base[6 * stride], base[7 * stride]);
-}
-
-inline
-__m256 simd_load8_indexed_ps(const float* base, const int* idx)
-{
-    return _mm256_setr_ps(base[idx[0]], base[idx[1]], base[idx[2]], base[idx[3]],
-        base[idx[4]], base[idx[5]], base[idx[6]], base[idx[7]]);
-}
-
+    throw std::runtime_error("no matching SIMD tier for this CPU");
 #endif
+}
