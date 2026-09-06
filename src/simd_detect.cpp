@@ -18,6 +18,32 @@ static simd_caps simd_detect()
 {
     simd_caps caps;
 
+#ifdef _DEBUG
+    // Print the detected SIMD capabilities
+    struct simd_caps_printer
+    {
+        ~simd_caps_printer()
+        {
+            cosyvoice_call_ggml_log_callback(
+                GGML_LOG_LEVEL_INFO,
+                std::format(
+                    "Detected SIMD capabilities: SSE4.2={}, AVX={}, FMA3={}, AVX2={}, AVX-512={}, AVX10.1-256={}, AVX10.1-512={}\n",
+                    bool(caps.sse42),
+                    bool(caps.avx),
+                    bool(caps.fma3),
+                    bool(caps.avx2),
+                    bool(caps.avx512),
+                    bool(caps.avx10_1_256),
+                    bool(caps.avx10_1_512)
+                ).c_str()
+            );
+        }
+
+        simd_caps& caps;
+    };
+    simd_caps_printer printer{ caps };
+#endif
+
 #if defined(_MSC_VER)
     int regs[4] = { 0, 0, 0, 0 };
     __cpuidex(regs, 1, 0);
@@ -77,6 +103,61 @@ static simd_caps simd_detect()
     {
         caps.avx512 = true;
         caps.fma3   = true;                    // AVX-512F includes FMA
+    }
+
+    // --- AVX10 (CPUID leaf 0x24) ---
+    // Enumerated independently of the legacy AVX-512 bits above: AVX10-only
+    // parts (Panther Lake onward) do not set them. Layout: EAX[7:0] =
+    // version (1 = AVX10.1, 2 = AVX10.2), EBX bit16 = 256-bit support,
+    // bit17 = 512-bit support. Opmask (XCR0 bit 5) is required for BOTH
+    // widths (k-masked tails); the 512 width additionally needs the ZMM
+    // state, exactly like legacy AVX-512. Version >= 1 gates both widths
+    // (10.2 is a strict superset of 10.1 and no kernel uses a 10.2-only
+    // instruction). avx10_1_256 drives its own tier; the 512 bit is an
+    // observation flag that the dispatch ORs onto the AVX-512 tier kernels
+    // (same instruction space -- see simd-dispatch.h).
+    unsigned max_leaf = 0;
+#if defined(_MSC_VER)
+    {
+        int r0[4];
+        __cpuidex(r0, 0, 0);
+        max_leaf = static_cast<unsigned>(r0[0]);
+    }
+#else
+    {
+        unsigned b = 0, c = 0, d = 0;
+        __get_cpuid(0, &max_leaf, &b, &c, &d);
+    }
+#endif
+    if (max_leaf >= 0x24)
+    {
+        unsigned e24a = 0;
+        unsigned e24b = 0;
+#if defined(_MSC_VER)
+        {
+            int r24[4];
+            __cpuidex(r24, 0x24, 0);
+            e24a = static_cast<unsigned>(r24[0]);
+            e24b = static_cast<unsigned>(r24[1]);
+        }
+#else
+        {
+            unsigned a = 0, b = 0, c = 0, d = 0;
+            if (__get_cpuid_count(0x24, 0, &a, &b, &c, &d))
+            {
+                e24a = a;
+                e24b = b;
+            }
+        }
+#endif
+        const unsigned avx10_ver = e24a & 0xffu;
+        if (avx10_ver >= 1)
+        {
+            if ((e24b & (1u << 16)) != 0 && (xcr0 & 0x26) == 0x26) // opmask+YMM(+XMM)
+                caps.avx10_1_256 = true;
+            if ((e24b & (1u << 17)) != 0 && (xcr0 & 0xe6) == 0xe6) // + ZMM state
+                caps.avx10_1_512 = true;
+        }
     }
 
     return caps;

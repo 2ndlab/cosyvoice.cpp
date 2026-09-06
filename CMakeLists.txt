@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.28)
 project(cosyvoice VERSION 0.1.2 LANGUAGES C CXX)
 
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+
 # Require 64-bit architecture — this project does not support 32-bit builds.
 if(CMAKE_SIZEOF_VOID_P LESS 8)
     message(FATAL_ERROR "cosyvoice requires a 64-bit build environment. "
@@ -73,6 +75,7 @@ option(COSYVOICE_HAS_SSE42 "Compile the SSE4.2-class SIMD tier" ON)
 option(COSYVOICE_HAS_AVX "Compile the AVX-class SIMD tier" ON)
 option(COSYVOICE_HAS_AVX2 "Compile the AVX2-class SIMD tier" ON)
 option(COSYVOICE_HAS_AVX512 "Compile the AVX-512 (F+BW+DQ) SIMD tier" ON)  # runtime gate additionally requires VL (MSVC dead-branch EVEX.256 encodings)
+option(COSYVOICE_HAS_AVX10_1 "Compile the AVX10.1-256 tier (512-bit AVX10 parts use the AVX-512 tier)" ON)
 
 # The SIMD classes are x86(-64). On non-x86 the SSE4.2+FMA3 class can be built
 # through SIMDe; without SIMDe the build auto-enables COSYVOICE_NO_SIMD (scalar
@@ -188,21 +191,45 @@ if(NOT COSYVOICE_TARGET_IS_X86)
     endif()
 endif()
 
+# The AVX10-256 tier additionally requires a toolchain that knows the flag
+# (-mavx10.1-256; MSVC /arch:AVX10.1 /vlen=256). Probe once per config; an
+# older compiler simply does not get that class. There is no AVX10-512 tier or
+# probe at all: AVX10 512-bit parts run the AVX-512 tier's kernels (the same
+# instruction space, compiled with plain -mavx512*/arch:AVX512 flags, so even
+# toolchains without any AVX10 support serve those CPUs) -- see simd-dispatch.h.
+if(COSYVOICE_TARGET_IS_X86 AND NOT COSYVOICE_NO_SIMD)
+    include(CheckCXXSourceCompiles)
+    if(MSVC)
+        set(CMAKE_REQUIRED_FLAGS "/arch:AVX10.1 /vlen=256")
+        check_cxx_source_compiles("int main() { return 0; }" _AVX10_1_256_OK)
+    else()
+        set(CMAKE_REQUIRED_FLAGS "-mavx10.1-256")
+        check_cxx_source_compiles("int main() { return 0; }" _AVX10_1_256_OK)
+    endif()
+    set(CMAKE_REQUIRED_FLAGS "")
+endif()
+
 if(COSYVOICE_NO_SIMD)
     set(_EFF_SSE42 OFF)
     set(_EFF_AVX   OFF)
     set(_EFF_AVX2  OFF)
     set(_EFF_512   OFF)
+    set(_EFF_10_1_256 OFF)
 elseif(NOT COSYVOICE_TARGET_IS_X86)
     set(_EFF_SSE42 ON)
     set(_EFF_AVX   OFF)
     set(_EFF_AVX2  OFF)
     set(_EFF_512   OFF)
+    set(_EFF_10_1_256 OFF)
 else()
     set(_EFF_SSE42 ${COSYVOICE_HAS_SSE42})
     set(_EFF_AVX   ${COSYVOICE_HAS_AVX})
     set(_EFF_AVX2  ${COSYVOICE_HAS_AVX2})
     set(_EFF_512   ${COSYVOICE_HAS_AVX512})
+    set(_EFF_10_1_256 OFF)
+    if(COSYVOICE_HAS_AVX10_1 AND _AVX10_1_256_OK)
+        set(_EFF_10_1_256 ON)
+    endif()
     if(NOT _EFF_SSE42)
         set(_EFF_AVX OFF)
         set(_EFF_AVX2 OFF)
@@ -248,6 +275,9 @@ function(cosyvoice_apply_simd TARGET_NAME)
     if(_EFF_512)
         target_compile_definitions(${TARGET_NAME} PRIVATE COSYVOICE_HAS_AVX512)
     endif()
+    if(_EFF_10_1_256)
+        target_compile_definitions(${TARGET_NAME} PRIVATE COSYVOICE_HAS_AVX10_1_256)
+    endif()
 
     # Non-x86 (SSE4.2+FMA3 class): SIMDe provides the intrinsic declarations
     # the compiled-in bodies reference; guaranteed present here (the scalar
@@ -264,8 +294,8 @@ endforeach()
 # -----------------------------------------------------------------------------
 # Per-tier SIMD kernel objects. Each SIMD class is ONE source file built as its
 # own OBJECT library with ONLY that class's ISA flags: -m<isa>... on GNU/Clang,
-# /arch:<isa> on MSVC (>=17.10 provides /arch:SSE4.2; /arch:AVX10.x is likewise
-# available for a future AVX10 tier). Kernel bodies live in
+# /arch:<isa> on MSVC (>=17.10 provides /arch:SSE4.2; /arch:AVX10.1 with
+# /vlen=N for the AVX10 tiers -- AVX10.2 parts run the 10.1 tiers). Kernel bodies live in
 # simd-kernels-impl.h, which is included solely by these TUs, so every emitted
 # instruction -- intrinsics AND compiler auto-vectorization -- is bounded to the
 # tier's own ISA, while caller TUs stay at the plain SSE2 baseline. The scalar
@@ -273,10 +303,13 @@ endforeach()
 # -----------------------------------------------------------------------------
 set(COSYVOICE_TIER_LIBS "")
 
-# Scalar fallback (simd_none) is the guaranteed tier: build it unconditionally
-# (it is also the dispatch target under COSYVOICE_NO_SIMD), no ISA flags at all.
-add_library(cosyvoice-tier-scalar OBJECT "${CMAKE_CURRENT_SOURCE_DIR}/src/simd/kernels_scalar.cpp")
-list(APPEND COSYVOICE_TIER_LIBS cosyvoice-tier-scalar)
+# Scalar fallback (simd_none): build on x86 (dispatch fallback) or when all SIMD
+# is disabled (COSYVOICE_NO_SIMD).  On non-x86 + SIMDe the sse42 tier already
+# provides the best path via NEON emulation; scalar is never dispatched.
+if(COSYVOICE_TARGET_IS_X86 OR COSYVOICE_NO_SIMD)
+    add_library(cosyvoice-tier-scalar OBJECT "${CMAKE_CURRENT_SOURCE_DIR}/src/simd/kernels_scalar.cpp")
+    list(APPEND COSYVOICE_TIER_LIBS cosyvoice-tier-scalar)
+endif()
 
 function(add_cosyvoice_simd_tier TIER TIER_SRC FLAGS MSVC_ARCH EFF)
     if(NOT EFF OR COSYVOICE_NO_SIMD)
@@ -310,10 +343,11 @@ add_cosyvoice_simd_tier(sse42   "${CMAKE_CURRENT_SOURCE_DIR}/src/simd/kernels_ss
 add_cosyvoice_simd_tier(avx     "${CMAKE_CURRENT_SOURCE_DIR}/src/simd/kernels_avx.cpp"     "-msse4.2;-mavx" "/arch:AVX" ${_EFF_AVX})
 add_cosyvoice_simd_tier(avx2    "${CMAKE_CURRENT_SOURCE_DIR}/src/simd/kernels_avx2.cpp"    "-msse4.2;-mavx;-mavx2;-mfma" "/arch:AVX2" ${_EFF_AVX2})
 add_cosyvoice_simd_tier(avx512  "${CMAKE_CURRENT_SOURCE_DIR}/src/simd/kernels_avx512.cpp"  "-msse4.2;-mavx;-mavx2;-mfma;-mavx512f;-mavx512bw;-mavx512dq" "/arch:AVX512" ${_EFF_512})
+add_cosyvoice_simd_tier(avx10_1_256 "${CMAKE_CURRENT_SOURCE_DIR}/src/simd/kernels_avx10_1_256.cpp" "-mavx10.1-256" "/arch:AVX10.1;/vlen=256" ${_EFF_10_1_256})
 
 # The callers' unresolved kernel references resolve against these objects when
-# libcosyvoice is linked. Scalar (simd_none) is a tier object too (see above),
-# so every preset -- including the COSYVOICE_NO_SIMD fallback -- is linked in.
+# libcosyvoice is linked. Scalar (simd_none) is included when built (x86 or
+# COSYVOICE_NO_SIMD); on non-x86 + SIMDe it is absent by design.
 if(COSYVOICE_TIER_LIBS)
     target_link_libraries(cosyvoice PRIVATE ${COSYVOICE_TIER_LIBS})
 endif()

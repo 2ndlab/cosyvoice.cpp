@@ -1,5 +1,8 @@
 #pragma once
 
+// simd_caps for the template helpers below (no intrinsic types leak in).
+#include "simd-dispatch.h"
+
 #if defined(__x86_64__) || defined(_M_X64)
     // Always include the intrinsic header on x86-64: the SIMD helpers below must be
     // declarable even for scalar-only builds so kernel templates that reference them
@@ -104,32 +107,154 @@ inline void simd_sincos_ps(__m128 x, __m128* out_sin, __m128* out_cos)
 
 #if defined(__AVX__) || (defined(_MSC_VER) && defined(_M_X64))
 
-inline void simd_sincos_ps(__m256 x, __m256* out_sin, __m256* out_cos)
+// Native 256-bit helpers. NOTE: the quadrant/sign logic is packed-integer
+// work (vpand/vpcmpeqd/vpslld ymm = AVX2 -- AVX1 only widened the float ops),
+// so the plain AVX preset must keep the two-128-bit-halves split; AVX2 and
+// AVX10.1-256 use native 256-bit lanes, bit-identical to the split (all steps
+// are per-lane). The AVX10.1-256 class additionally swaps the compare/select
+// chains for EVEX k-mask forms (same values, fewer ops). Template on the
+// preset: the k-mask bodies are only ever instantiated (and thus need only
+// ever be declared) in a TU that enables them -- the gate mirrors the one on
+// the tail helpers in simd-kernels-impl.h.
+template<simd_caps C>
+inline
+void simd_sincos_ps(__m256 x, __m256* out_sin, __m256* out_cos)
 {
-    __m128 sl, cl;
-    simd_sincos_ps(_mm256_castps256_ps128(x), &sl, &cl);
-    __m128 sh, ch;
-    simd_sincos_ps(_mm256_extractf128_ps(x, 1), &sh, &ch);
-    *out_sin = _mm256_insertf128_ps(_mm256_castps128_ps256(sl), sh, 1);
-    *out_cos = _mm256_insertf128_ps(_mm256_castps128_ps256(cl), ch, 1);
-}
+    if constexpr (!C.avx2 && !C.avx10_1_256)
+    {
+        // plain AVX: two 128-bit halves.
+        __m128 sl, cl;
+        simd_sincos_ps(_mm256_castps256_ps128(x), &sl, &cl);
+        __m128 sh, ch;
+        simd_sincos_ps(_mm256_extractf128_ps(x, 1), &sh, &ch);
+        *out_sin = _mm256_insertf128_ps(_mm256_castps128_ps256(sl), sh, 1);
+        *out_cos = _mm256_insertf128_ps(_mm256_castps128_ps256(cl), ch, 1);
+    }
+    else
+    {
+        const __m256 fopi = _mm256_set1_ps(0.636619772367581343f);
+        const __m256 dp1 = _mm256_set1_ps(1.5703125f);
+        const __m256 dp2 = _mm256_set1_ps(0.00048370361328125f);
+        const __m256 dp3 = _mm256_set1_ps(1.231816068643494e-7f);
 
+        __m256i q = _mm256_cvtps_epi32(_mm256_mul_ps(x, fopi));
+        __m256 qf = _mm256_cvtepi32_ps(q);
+        __m256 r = _mm256_sub_ps(x, _mm256_mul_ps(qf, dp1));
+        r = _mm256_sub_ps(r, _mm256_mul_ps(qf, dp2));
+        r = _mm256_sub_ps(r, _mm256_mul_ps(qf, dp3));
+
+        __m256 r2 = _mm256_mul_ps(r, r);
+        __m256 s = _mm256_add_ps(_mm256_mul_ps(_mm256_set1_ps(-1.9515295891e-4f), r2), _mm256_set1_ps(8.3321608736e-3f));
+        s = _mm256_add_ps(_mm256_mul_ps(s, r2), _mm256_set1_ps(-1.6666654611e-1f));
+        s = _mm256_mul_ps(s, r2);
+        s = _mm256_mul_ps(s, r);
+        s = _mm256_add_ps(s, r);
+
+        __m256 c = _mm256_add_ps(_mm256_mul_ps(_mm256_set1_ps(2.443315711809948e-5f), r2), _mm256_set1_ps(-1.388731625493765e-3f));
+        c = _mm256_add_ps(_mm256_mul_ps(c, r2), _mm256_set1_ps(4.166664568298827e-2f));
+        c = _mm256_mul_ps(c, r2);
+        c = _mm256_sub_ps(c, _mm256_set1_ps(0.5f));
+        c = _mm256_mul_ps(c, r2);
+        c = _mm256_add_ps(c, _mm256_set1_ps(1.f));
+
+        const __m256i one_i = _mm256_set1_epi32(1);
+        const __m256i two_i = _mm256_set1_epi32(2);
+#if defined(__AVX10_1_256__) || defined(__AVX512VL__) || (defined(_MSC_VER) && defined(_M_X64))
+        if constexpr (C.avx10_1_256)
+        {
+            // Quadrant swap/flip via k-masks (vpcmpd is AVX512F+VL -- no DQ/BW
+            // dependency): swap = (q&1)!=0, flip = (q&2)!=0. Sign-bit xor matches
+            // the 512-bit path (bit-identical to 0-s for every finite result).
+            const __mmask8 swap = _mm256_cmp_epi32_mask(_mm256_and_si256(q, one_i), _mm256_setzero_si256(), _MM_CMPINT_NE);
+            const __mmask8 flip = _mm256_cmp_epi32_mask(_mm256_and_si256(q, two_i), _mm256_setzero_si256(), _MM_CMPINT_NE);
+            const __m256i signbit = _mm256_set1_epi32(static_cast<int>(0x80000000u));
+            const __m256 ns = _mm256_castsi256_ps(_mm256_xor_si256(_mm256_castps_si256(s), signbit));
+            const __m256 sv = _mm256_mask_blend_ps(swap, s, c);
+            const __m256 cv = _mm256_mask_blend_ps(swap, c, ns);
+            *out_sin = _mm256_castsi256_ps(_mm256_mask_xor_epi32(_mm256_castps_si256(sv), flip, _mm256_castps_si256(sv), signbit));
+            *out_cos = _mm256_castsi256_ps(_mm256_mask_xor_epi32(_mm256_castps_si256(cv), flip, _mm256_castps_si256(cv), signbit));
+        }
+        else
 #endif
+        {
+            __m256 swap = _mm256_castsi256_ps(_mm256_cmpeq_epi32(_mm256_and_si256(q, one_i), one_i));
+            __m256 quad_xor = _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_and_si256(q, two_i), 30));
 
-#if defined(__AVX__) || (defined(_MSC_VER) && defined(_M_X64))
-
-inline __m256 simd_log_ps(__m256 x)
-{
-    return _mm256_insertf128_ps(
-        _mm256_castps128_ps256(simd_log_ps(_mm256_castps256_ps128(x))),
-        simd_log_ps(_mm256_extractf128_ps(x, 1)), 1);
+            __m256 ns = _mm256_sub_ps(_mm256_setzero_ps(), s);
+            __m256 sv = _mm256_or_ps(_mm256_and_ps(swap, c), _mm256_andnot_ps(swap, s));
+            __m256 cv = _mm256_or_ps(_mm256_and_ps(swap, ns), _mm256_andnot_ps(swap, c));
+            *out_sin = _mm256_xor_ps(sv, quad_xor);
+            *out_cos = _mm256_xor_ps(cv, quad_xor);
+        }
+    }
 }
 
-inline __m256 simd_log10_ps(__m256 x)
+template<simd_caps C>
+inline
+__m256 simd_log_ps(__m256 x)
 {
-    return _mm256_insertf128_ps(
-        _mm256_castps128_ps256(simd_log10_ps(_mm256_castps256_ps128(x))),
-        simd_log10_ps(_mm256_extractf128_ps(x, 1)), 1);
+    if constexpr (!C.avx2 && !C.avx10_1_256)
+    {
+        // plain AVX: no 256-bit integer logic (srli/andnot/or ymm are AVX2).
+        return _mm256_insertf128_ps(
+            _mm256_castps128_ps256(simd_log_ps(_mm256_castps256_ps128(x))),
+            simd_log_ps(_mm256_extractf128_ps(x, 1)), 1);
+    }
+    else
+    {
+    __m256 rx = _mm256_max_ps(x, _mm256_set1_ps(1.17549435082228751e-38f));
+
+    __m256i bits = _mm256_castps_si256(rx);
+    __m256 e = _mm256_cvtepi32_ps(_mm256_sub_epi32(_mm256_srli_epi32(bits, 23), _mm256_set1_epi32(127)));
+    __m256 f = _mm256_castsi256_ps(
+        _mm256_or_si256(_mm256_andnot_si256(_mm256_set1_epi32(static_cast<int>(0xFF800000u)), bits),
+                        _mm256_set1_epi32(static_cast<int>(0x3F000000u))));
+
+    const __m256 one = _mm256_set1_ps(1.f);
+    __m256 u, e1;
+#if defined(__AVX10_1_256__) || defined(__AVX512VL__) || (defined(_MSC_VER) && defined(_M_X64))
+    if constexpr (C.avx10_1_256)
+    {
+        // maskz_mov(~m, f) == andnot(m, f) and maskz_mov(m, one) == and(m, one),
+        // lane by lane -- bit-identical to the VEX select below.
+        const __mmask8 m = _mm256_cmp_ps_mask(f, _mm256_set1_ps(0.707106781186547524f), _CMP_GT_OQ);
+        u = _mm256_add_ps(_mm256_sub_ps(f, one), _mm256_maskz_mov_ps(static_cast<__mmask8>(~m), f));
+        e1 = _mm256_add_ps(e, _mm256_maskz_mov_ps(m, one));
+    }
+    else
+#endif
+    {
+        // _mm256_cmp_ps(f, k, _CMP_GT_OQ) is the ordered "greater than" that
+        // _mm_cmpgt_ps also compiles to at 128-bit (NaN -> false, both forms).
+        __m256 mask = _mm256_cmp_ps(f, _mm256_set1_ps(0.707106781186547524f), _CMP_GT_OQ);
+        u = _mm256_add_ps(_mm256_sub_ps(f, one), _mm256_andnot_ps(mask, f));
+        e1 = _mm256_add_ps(e, _mm256_and_ps(mask, one));
+    }
+
+    __m256 z = _mm256_mul_ps(u, u);
+    __m256 y = _mm256_set1_ps(7.0376836292e-2f);
+    y = _mm256_add_ps(_mm256_mul_ps(y, u), _mm256_set1_ps(-1.1514610310e-1f));
+    y = _mm256_add_ps(_mm256_mul_ps(y, u), _mm256_set1_ps(1.1676998740e-1f));
+    y = _mm256_add_ps(_mm256_mul_ps(y, u), _mm256_set1_ps(-1.2420140846e-1f));
+    y = _mm256_add_ps(_mm256_mul_ps(y, u), _mm256_set1_ps(1.4249322787e-1f));
+    y = _mm256_add_ps(_mm256_mul_ps(y, u), _mm256_set1_ps(-1.6668057665e-1f));
+    y = _mm256_add_ps(_mm256_mul_ps(y, u), _mm256_set1_ps(2.0000714765e-1f));
+    y = _mm256_add_ps(_mm256_mul_ps(y, u), _mm256_set1_ps(-2.4999993993e-1f));
+    y = _mm256_add_ps(_mm256_mul_ps(y, u), _mm256_set1_ps(3.3333331174e-1f));
+    y = _mm256_mul_ps(y, u);
+    y = _mm256_mul_ps(y, z);
+    y = _mm256_sub_ps(y, _mm256_mul_ps(z, _mm256_set1_ps(0.5f)));
+    y = _mm256_add_ps(y, u);
+    y = _mm256_add_ps(y, _mm256_mul_ps(e1, _mm256_set1_ps(-2.12194440e-4f)));
+    return _mm256_add_ps(y, _mm256_mul_ps(e1, _mm256_set1_ps(0.693359375f)));
+    }
+}
+
+template<simd_caps C>
+inline
+__m256 simd_log10_ps(__m256 x)
+{
+    return _mm256_mul_ps(simd_log_ps<C>(x), _mm256_set1_ps(0.43429448190325182765f));
 }
 
 #endif

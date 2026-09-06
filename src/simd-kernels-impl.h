@@ -221,6 +221,49 @@ __m512 simd_tail_load16_strided_ps(const float* base, int stride, size_t valid)
 }
 #endif
 
+// --- AVX10.1-256 tail helpers ------------------------------------------------
+// The 256-bit AVX10 class masks its own remainder (no 128-bit vector tail);
+// these mirror the 16-wide helpers above at width 8. (AVX10.2 is a strict
+// superset of 10.1 and no kernel uses a 10.2-only instruction, so 10.2 parts
+// dispatch here -- see simd-dispatch.h.) VL-type availability: -mavx10.1-256
+// defines __AVX512VL__ on clang (and the __AVX10_1_256__ feature macro),
+// MSVC x64 declares every intrinsic unconditionally.
+#if defined(__AVX10_1_256__) || defined(__AVX512VL__) || (defined(_MSC_VER) && defined(_M_X64))
+
+template <simd_caps C>
+inline
+__mmask8 simd_tail_mask8(size_t count)
+{
+    return static_cast<__mmask8>((1u << count) - 1u);
+}
+
+// strided tail load of `valid` (<8) leading elements, zero-filled rest; never
+// reads out of range.
+template <simd_caps C>
+inline
+__m256 simd_tail_load8_strided_ps(const float* base, int stride, size_t valid)
+{
+    alignas(32) float tmp[8];
+    size_t t = 0;
+    for (; t != valid; ++t) tmp[t] = base[t * stride];
+    for (; t != 8; ++t) tmp[t] = 0.f;
+    return _mm256_load_ps(tmp);
+}
+
+// indexed (gather-vector) tail load of `valid` (<8) entries, zero-filled rest.
+template <simd_caps C>
+inline
+__m256 simd_tail_load8_indexed_ps(const float* base, const int* idx, size_t valid)
+{
+    alignas(32) float tmp[8];
+    size_t t = 0;
+    for (; t != valid; ++t) tmp[t] = base[idx[t]];
+    for (; t != 8; ++t) tmp[t] = 0.f;
+    return _mm256_load_ps(tmp);
+}
+
+#endif  // AVX10-256 tail helpers
+
 // --- shared helpers pulled out of the kernel TUs ---------------------------
 #if defined(__AVX512F__) || (defined(_MSC_VER) && defined(_M_X64))
 template<simd_caps C>
@@ -291,7 +334,6 @@ static inline float hmax_ps(__m256 v)
     return hmax_ps(low);
 }
 #endif
-
 
 
 #endif  // !COSYVOICE_NO_SIMD
@@ -410,8 +452,8 @@ void fft_bfly2_kernel<C>::run(float* Foutr, float* Fouti, int fstride, const flo
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             if (fstride == 1)
                 for (; i + 7 < m; i += 8)
@@ -438,8 +480,8 @@ void fft_bfly2_kernel<C>::run(float* Foutr, float* Fouti, int fstride, const flo
                 typename simd_vec<C, 8>::f F2i = _mm256_loadu_ps(Fouti + m + i);
                 typename simd_vec<C, 8>::f Twr;
                 typename simd_vec<C, 8>::f Twi;
-#if defined(COSYVOICE_HAS_AVX2)
-                if constexpr (C.avx2)
+#if defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+                if constexpr (C.avx2 || C.avx10_1_256)
                 {
                     const typename simd_vec<C, 8>::i vidx0 = _mm256_setr_epi32(
                         0 * fstride, 1 * fstride, 2 * fstride, 3 * fstride,
@@ -467,6 +509,41 @@ void fft_bfly2_kernel<C>::run(float* Foutr, float* Fouti, int fstride, const flo
             }
         }
 #endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+        if (i < m)
+        {
+            const typename simd_vec<C, 8>::mask mask = simd_tail_mask8<C>(m - i);
+            typename simd_vec<C, 8>::f F2r = _mm256_maskz_loadu_ps(mask, Foutr + m + i);
+            typename simd_vec<C, 8>::f F2i = _mm256_maskz_loadu_ps(mask, Fouti + m + i);
+            typename simd_vec<C, 8>::f Twr;
+            typename simd_vec<C, 8>::f Twi;
+            if (fstride == 1)
+            {
+                Twr = _mm256_maskz_loadu_ps(mask, tw_r + i);
+                Twi = _mm256_maskz_loadu_ps(mask, tw_i + i);
+            }
+            else
+            {
+                Twr = simd_tail_load8_strided_ps<C>(tw_r + i * fstride, fstride, m - i);
+                Twi = simd_tail_load8_strided_ps<C>(tw_i + i * fstride, fstride, m - i);
+            }
+
+            typename simd_vec<C, 8>::f tr = simd_fmsub_ps<C>(F2r, Twr, _mm256_mul_ps(F2i, Twi));
+            typename simd_vec<C, 8>::f ti = simd_fmadd_ps<C>(F2r, Twi, _mm256_mul_ps(F2i, Twr));
+
+            typename simd_vec<C, 8>::f Fr = _mm256_maskz_loadu_ps(mask, Foutr + i);
+            typename simd_vec<C, 8>::f Fi = _mm256_maskz_loadu_ps(mask, Fouti + i);
+
+            _mm256_mask_storeu_ps(Foutr + m + i, mask, _mm256_sub_ps(Fr, tr));
+            _mm256_mask_storeu_ps(Fouti + m + i, mask, _mm256_sub_ps(Fi, ti));
+            _mm256_mask_storeu_ps(Foutr + i, mask, _mm256_add_ps(Fr, tr));
+            _mm256_mask_storeu_ps(Fouti + i, mask, _mm256_add_ps(Fi, ti));
+        }
+            return;
+        }
+#endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
         if constexpr (C.sse42)
         {
@@ -483,8 +560,8 @@ void fft_bfly2_kernel<C>::run(float* Foutr, float* Fouti, int fstride, const flo
                 }
                 else
                 {
-#if defined(COSYVOICE_HAS_AVX2)
-                    if constexpr (C.avx2)
+#if defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+                    if constexpr (C.avx2 || C.avx10_1_256)
                     {
                         const typename simd_vec<C, 4>::i vidx0_128 = _mm_setr_epi32(
                             0 * fstride, 1 * fstride, 2 * fstride, 3 * fstride);
@@ -660,8 +737,8 @@ void fft_bfly4_kernel<C>::run(float* Foutr, float* Fouti, int fstride, float* tw
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             for (; k + 7 < m; k += 8)
             {
@@ -691,8 +768,8 @@ void fft_bfly4_kernel<C>::run(float* Foutr, float* Fouti, int fstride, float* tw
 
                 typename simd_vec<C, 8>::f t1r, t1i, t2r, t2i, t3r, t3i;
 
-#if defined(COSYVOICE_HAS_AVX2)
-                if constexpr (C.avx2)
+#if defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+                if constexpr (C.avx2 || C.avx10_1_256)
                 {
                     const typename simd_vec<C, 8>::i vidx0 = _mm256_setr_epi32(
                         0, fstride, 2 * fstride, 3 * fstride,
@@ -771,6 +848,68 @@ void fft_bfly4_kernel<C>::run(float* Foutr, float* Fouti, int fstride, float* tw
             }
         }
 #endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+        if (k < m)
+        {
+            const typename simd_vec<C, 8>::mask mask = simd_tail_mask8<C>(m - k);
+            const size_t rem = static_cast<size_t>(m - k);
+            float* p0r = Foutr + k;
+            float* p0i = Fouti + k;
+            float* p1r = Foutr + k + m;
+            float* p1i = Fouti + k + m;
+            float* p2r = Foutr + k + m2;
+            float* p2i = Fouti + k + m2;
+            float* p3r = Foutr + k + m3;
+            float* p3i = Fouti + k + m3;
+
+            typename simd_vec<C, 8>::f r0 = _mm256_maskz_loadu_ps(mask, p0r);
+            typename simd_vec<C, 8>::f i0 = _mm256_maskz_loadu_ps(mask, p0i);
+            typename simd_vec<C, 8>::f r1 = _mm256_maskz_loadu_ps(mask, p1r);
+            typename simd_vec<C, 8>::f i1 = _mm256_maskz_loadu_ps(mask, p1i);
+            typename simd_vec<C, 8>::f r2 = _mm256_maskz_loadu_ps(mask, p2r);
+            typename simd_vec<C, 8>::f i2 = _mm256_maskz_loadu_ps(mask, p2i);
+            typename simd_vec<C, 8>::f r3 = _mm256_maskz_loadu_ps(mask, p3r);
+            typename simd_vec<C, 8>::f i3 = _mm256_maskz_loadu_ps(mask, p3i);
+
+            typename simd_vec<C, 8>::f t1r = simd_tail_load8_strided_ps<C>(twr + k * fstride, fstride, rem);
+            typename simd_vec<C, 8>::f t1i = simd_tail_load8_strided_ps<C>(twi + k * fstride, fstride, rem);
+            typename simd_vec<C, 8>::f t2r = simd_tail_load8_strided_ps<C>(twr + 2 * k * fstride, 2 * fstride, rem);
+            typename simd_vec<C, 8>::f t2i = simd_tail_load8_strided_ps<C>(twi + 2 * k * fstride, 2 * fstride, rem);
+            typename simd_vec<C, 8>::f t3r = simd_tail_load8_strided_ps<C>(twr + 3 * k * fstride, 3 * fstride, rem);
+            typename simd_vec<C, 8>::f t3i = simd_tail_load8_strided_ps<C>(twi + 3 * k * fstride, 3 * fstride, rem);
+
+            typename simd_vec<C, 8>::f s0r = simd_fmsub_ps<C>(r1, t1r, _mm256_mul_ps(i1, t1i));
+            typename simd_vec<C, 8>::f s0i = simd_fmadd_ps<C>(r1, t1i, _mm256_mul_ps(i1, t1r));
+            typename simd_vec<C, 8>::f s1r = simd_fmsub_ps<C>(r2, t2r, _mm256_mul_ps(i2, t2i));
+            typename simd_vec<C, 8>::f s1i = simd_fmadd_ps<C>(r2, t2i, _mm256_mul_ps(i2, t2r));
+            typename simd_vec<C, 8>::f s2r = simd_fmsub_ps<C>(r3, t3r, _mm256_mul_ps(i3, t3i));
+            typename simd_vec<C, 8>::f s2i = simd_fmadd_ps<C>(r3, t3i, _mm256_mul_ps(i3, t3r));
+
+            typename simd_vec<C, 8>::f tmp_r = _mm256_sub_ps(r0, s1r);
+            typename simd_vec<C, 8>::f tmp_i = _mm256_sub_ps(i0, s1i);
+
+            r0 = _mm256_add_ps(r0, s1r);
+            i0 = _mm256_add_ps(i0, s1i);
+
+            typename simd_vec<C, 8>::f s3r = _mm256_add_ps(s0r, s2r);
+            typename simd_vec<C, 8>::f s3i = _mm256_add_ps(s0i, s2i);
+            typename simd_vec<C, 8>::f s4r = _mm256_sub_ps(s0r, s2r);
+            typename simd_vec<C, 8>::f s4i = _mm256_sub_ps(s0i, s2i);
+
+            _mm256_mask_storeu_ps(p2r, mask, _mm256_sub_ps(r0, s3r));
+            _mm256_mask_storeu_ps(p2i, mask, _mm256_sub_ps(i0, s3i));
+            _mm256_mask_storeu_ps(p0r, mask, _mm256_add_ps(r0, s3r));
+            _mm256_mask_storeu_ps(p0i, mask, _mm256_add_ps(i0, s3i));
+            _mm256_mask_storeu_ps(p1r, mask, _mm256_add_ps(tmp_r, s4i));
+            _mm256_mask_storeu_ps(p1i, mask, _mm256_sub_ps(tmp_i, s4r));
+            _mm256_mask_storeu_ps(p3r, mask, _mm256_sub_ps(tmp_r, s4i));
+            _mm256_mask_storeu_ps(p3i, mask, _mm256_add_ps(tmp_i, s4r));
+        }
+            return;
+        }
+#endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
         if constexpr (C.sse42)
         {
@@ -801,8 +940,8 @@ void fft_bfly4_kernel<C>::run(float* Foutr, float* Fouti, int fstride, float* tw
                 typename simd_vec<C, 4>::f i3 = _mm_loadu_ps(p3i);
 
                 typename simd_vec<C, 4>::f t1r, t1i, t2r, t2i, t3r, t3i;
-#if defined(COSYVOICE_HAS_AVX2)
-                if constexpr (C.avx2)
+#if defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+                if constexpr (C.avx2 || C.avx10_1_256)
                 {
                     const typename simd_vec<C, 4>::i vidx0 = _mm_setr_epi32(0, fstride, 2 * fstride, 3 * fstride);
                     const typename simd_vec<C, 4>::i vidx1 = _mm_mullo_epi32(vidx0, _mm_set1_epi32(2));
@@ -972,8 +1111,8 @@ void fft_bfly3_kernel<C>::run(float* Foutr, float* Fouti, int fstride, float* tw
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             for (const typename simd_vec<C, 8>::f v_half = _mm256_set1_ps(0.5f), v_epi3 = _mm256_set1_ps(epi3_i); k + 7 < m; k += 8)
             {
@@ -985,8 +1124,8 @@ void fft_bfly3_kernel<C>::run(float* Foutr, float* Fouti, int fstride, float* tw
                 typename simd_vec<C, 8>::f fi2 = _mm256_loadu_ps(Fouti + m2 + k);
 
                 typename simd_vec<C, 8>::f tw1r, tw1i, tw2r, tw2i;
-#if defined(COSYVOICE_HAS_AVX2)
-                if constexpr (C.avx2)
+#if defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+                if constexpr (C.avx2 || C.avx10_1_256)
                 {
                     typename simd_vec<C, 8>::i idx1 = _mm256_setr_epi32(
                         k * fstride, (k + 1) * fstride, (k + 2) * fstride, (k + 3) * fstride,
@@ -1049,6 +1188,61 @@ void fft_bfly3_kernel<C>::run(float* Foutr, float* Fouti, int fstride, float* tw
             }
         }
 #endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+        const typename simd_vec<C, 8>::f v_half = _mm256_set1_ps(0.5f), v_epi3 = _mm256_set1_ps(epi3_i);
+            if (k < m)
+            {
+                const typename simd_vec<C, 8>::mask mask = simd_tail_mask8<C>(m - k);
+                const size_t rem = static_cast<size_t>(m - k);
+                typename simd_vec<C, 8>::f fr0 = _mm256_maskz_loadu_ps(mask, Foutr + k);
+                typename simd_vec<C, 8>::f fi0 = _mm256_maskz_loadu_ps(mask, Fouti + k);
+                typename simd_vec<C, 8>::f fr1 = _mm256_maskz_loadu_ps(mask, Foutr + m + k);
+                typename simd_vec<C, 8>::f fi1 = _mm256_maskz_loadu_ps(mask, Fouti + m + k);
+                typename simd_vec<C, 8>::f fr2 = _mm256_maskz_loadu_ps(mask, Foutr + m2 + k);
+                typename simd_vec<C, 8>::f fi2 = _mm256_maskz_loadu_ps(mask, Fouti + m2 + k);
+
+                typename simd_vec<C, 8>::f tw1r = simd_tail_load8_strided_ps<C>(tw1_r + k * fstride, fstride, rem);
+                typename simd_vec<C, 8>::f tw1i = simd_tail_load8_strided_ps<C>(tw1_i + k * fstride, fstride, rem);
+                typename simd_vec<C, 8>::f tw2r = simd_tail_load8_strided_ps<C>(tw1_r + 2 * k * fstride, 2 * fstride, rem);
+                typename simd_vec<C, 8>::f tw2i = simd_tail_load8_strided_ps<C>(tw1_i + 2 * k * fstride, 2 * fstride, rem);
+
+                typename simd_vec<C, 8>::f sr1 = simd_fmsub_ps<C>(fr1, tw1r, _mm256_mul_ps(fi1, tw1i));
+                typename simd_vec<C, 8>::f si1 = simd_fmadd_ps<C>(fr1, tw1i, _mm256_mul_ps(fi1, tw1r));
+                typename simd_vec<C, 8>::f sr2 = simd_fmsub_ps<C>(fr2, tw2r, _mm256_mul_ps(fi2, tw2i));
+                typename simd_vec<C, 8>::f si2 = simd_fmadd_ps<C>(fr2, tw2i, _mm256_mul_ps(fi2, tw2r));
+
+                typename simd_vec<C, 8>::f sr3 = _mm256_add_ps(sr1, sr2);
+                typename simd_vec<C, 8>::f si3 = _mm256_add_ps(si1, si2);
+                typename simd_vec<C, 8>::f sr0 = _mm256_sub_ps(sr1, sr2);
+                typename simd_vec<C, 8>::f si0 = _mm256_sub_ps(si1, si2);
+
+                typename simd_vec<C, 8>::f fr1o = _mm256_sub_ps(fr0, _mm256_mul_ps(sr3, v_half));
+                typename simd_vec<C, 8>::f fi1o = _mm256_sub_ps(fi0, _mm256_mul_ps(si3, v_half));
+
+                sr0 = _mm256_mul_ps(sr0, v_epi3);
+                si0 = _mm256_mul_ps(si0, v_epi3);
+
+                typename simd_vec<C, 8>::f fr0o = _mm256_add_ps(fr0, sr3);
+                typename simd_vec<C, 8>::f fi0o = _mm256_add_ps(fi0, si3);
+
+                typename simd_vec<C, 8>::f fr2o = _mm256_add_ps(fr1o, si0);
+                typename simd_vec<C, 8>::f fi2o = _mm256_sub_ps(fi1o, sr0);
+
+                fr1o = _mm256_sub_ps(fr1o, si0);
+                fi1o = _mm256_add_ps(fi1o, sr0);
+
+                _mm256_mask_storeu_ps(Foutr + k, mask, fr0o);
+                _mm256_mask_storeu_ps(Fouti + k, mask, fi0o);
+                _mm256_mask_storeu_ps(Foutr + m + k, mask, fr1o);
+                _mm256_mask_storeu_ps(Fouti + m + k, mask, fi1o);
+                _mm256_mask_storeu_ps(Foutr + m2 + k, mask, fr2o);
+                _mm256_mask_storeu_ps(Fouti + m2 + k, mask, fi2o);
+            }
+            return;
+        }
+#endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
         if constexpr (C.sse42)
         {
@@ -1071,8 +1265,8 @@ void fft_bfly3_kernel<C>::run(float* Foutr, float* Fouti, int fstride, float* tw
                     tw1r = _mm_loadu_ps(tw1_r + k);
                     tw1i = _mm_loadu_ps(tw1_i + k);
 
-#if defined(COSYVOICE_HAS_AVX2)
-                    if constexpr (C.avx2)
+#if defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+                    if constexpr (C.avx2 || C.avx10_1_256)
                     {
                         const typename simd_vec<C, 4>::i idx2 = _mm_setr_epi32(k * 2, (k + 1) * 2, (k + 2) * 2, (k + 3) * 2);
                         tw2r = _mm_i32gather_ps(tw1_r, idx2, 4);
@@ -1087,8 +1281,8 @@ void fft_bfly3_kernel<C>::run(float* Foutr, float* Fouti, int fstride, float* tw
                 }
                 else
                 {
-#if defined(COSYVOICE_HAS_AVX2)
-                    if constexpr (C.avx2)
+#if defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+                    if constexpr (C.avx2 || C.avx10_1_256)
                     {
                         const typename simd_vec<C, 4>::i idx1 = _mm_setr_epi32(
                             k * fstride, (k + 1) * fstride, (k + 2) * fstride, (k + 3) * fstride);
@@ -1294,16 +1488,16 @@ void fft_bfly5_kernel<C>::run(float* Foutr, float* Fouti, int fstride, const flo
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             for (const typename simd_vec<C, 8>::f v_yar = _mm256_set1_ps(yar),
                 v_yai = _mm256_set1_ps(yai),
                 v_ybr = _mm256_set1_ps(ybr),
                 v_ybi = _mm256_set1_ps(ybi); u + 7 < m; u += 8) {
                 typename simd_vec<C, 8>::f tw1r, tw1i, tw2r, tw2i, tw3r, tw3i, tw4r, tw4i;
-#if defined(COSYVOICE_HAS_AVX2)
-                if constexpr (C.avx2)
+#if defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+                if constexpr (C.avx2 || C.avx10_1_256)
                 {
                     typename simd_vec<C, 8>::i idx1 = _mm256_setr_epi32(
                         u * fstride, (u + 1) * fstride, (u + 2) * fstride, (u + 3) * fstride,
@@ -1412,6 +1606,96 @@ void fft_bfly5_kernel<C>::run(float* Foutr, float* Fouti, int fstride, const flo
             }
         }
 #endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+        const typename simd_vec<C, 8>::f v_yar = _mm256_set1_ps(yar),
+            v_yai = _mm256_set1_ps(yai),
+            v_ybr = _mm256_set1_ps(ybr),
+            v_ybi = _mm256_set1_ps(ybi);
+            if (u < m)
+            {
+                const typename simd_vec<C, 8>::mask mask = simd_tail_mask8<C>(m - u);
+                const size_t rem = static_cast<size_t>(m - u);
+                typename simd_vec<C, 8>::f tw1r = simd_tail_load8_strided_ps<C>(tw_r + u * fstride, fstride, rem);
+                typename simd_vec<C, 8>::f tw1i = simd_tail_load8_strided_ps<C>(tw_i + u * fstride, fstride, rem);
+                typename simd_vec<C, 8>::f tw2r = simd_tail_load8_strided_ps<C>(tw_r + 2 * u * fstride, 2 * fstride, rem);
+                typename simd_vec<C, 8>::f tw2i = simd_tail_load8_strided_ps<C>(tw_i + 2 * u * fstride, 2 * fstride, rem);
+                typename simd_vec<C, 8>::f tw3r = simd_tail_load8_strided_ps<C>(tw_r + 3 * u * fstride, 3 * fstride, rem);
+                typename simd_vec<C, 8>::f tw3i = simd_tail_load8_strided_ps<C>(tw_i + 3 * u * fstride, 3 * fstride, rem);
+                typename simd_vec<C, 8>::f tw4r = simd_tail_load8_strided_ps<C>(tw_r + 4 * u * fstride, 4 * fstride, rem);
+                typename simd_vec<C, 8>::f tw4i = simd_tail_load8_strided_ps<C>(tw_i + 4 * u * fstride, 4 * fstride, rem);
+
+                typename simd_vec<C, 8>::f f0r = _mm256_maskz_loadu_ps(mask, F0r + u);
+                typename simd_vec<C, 8>::f f0i = _mm256_maskz_loadu_ps(mask, F0i + u);
+                typename simd_vec<C, 8>::f f1r = _mm256_maskz_loadu_ps(mask, F1r + u);
+                typename simd_vec<C, 8>::f f1i = _mm256_maskz_loadu_ps(mask, F1i + u);
+                typename simd_vec<C, 8>::f f2r = _mm256_maskz_loadu_ps(mask, F2r + u);
+                typename simd_vec<C, 8>::f f2i = _mm256_maskz_loadu_ps(mask, F2i + u);
+                typename simd_vec<C, 8>::f f3r = _mm256_maskz_loadu_ps(mask, F3r + u);
+                typename simd_vec<C, 8>::f f3i = _mm256_maskz_loadu_ps(mask, F3i + u);
+                typename simd_vec<C, 8>::f f4r = _mm256_maskz_loadu_ps(mask, F4r + u);
+                typename simd_vec<C, 8>::f f4i = _mm256_maskz_loadu_ps(mask, F4i + u);
+
+                CMUL<C>(f1r, f1i, tw1r, tw1i);
+                CMUL<C>(f2r, f2i, tw2r, tw2i);
+                CMUL<C>(f3r, f3i, tw3r, tw3i);
+                CMUL<C>(f4r, f4i, tw4r, tw4i);
+
+                typename simd_vec<C, 8>::f s7r = _mm256_add_ps(f1r, f4r);
+                typename simd_vec<C, 8>::f s7i = _mm256_add_ps(f1i, f4i);
+                typename simd_vec<C, 8>::f s10r = _mm256_sub_ps(f1r, f4r);
+                typename simd_vec<C, 8>::f s10i = _mm256_sub_ps(f1i, f4i);
+                typename simd_vec<C, 8>::f s8r = _mm256_add_ps(f2r, f3r);
+                typename simd_vec<C, 8>::f s8i = _mm256_add_ps(f2i, f3i);
+                typename simd_vec<C, 8>::f s9r = _mm256_sub_ps(f2r, f3r);
+                typename simd_vec<C, 8>::f s9i = _mm256_sub_ps(f2i, f3i);
+
+                typename simd_vec<C, 8>::f s5r = simd_fmadd_ps<C>(s7r, v_yar, f0r);
+                s5r = simd_fmadd_ps<C>(s8r, v_ybr, s5r);
+                typename simd_vec<C, 8>::f s5i = simd_fmadd_ps<C>(s7i, v_yar, f0i);
+                s5i = simd_fmadd_ps<C>(s8i, v_ybr, s5i);
+
+                typename simd_vec<C, 8>::f s6r = simd_fmadd_ps<C>(s10i, v_yai, _mm256_mul_ps(s9i, v_ybi));
+                typename simd_vec<C, 8>::f s6i = _mm256_sub_ps(_mm256_setzero_ps(), simd_fmadd_ps<C>(s10r, v_yai, _mm256_mul_ps(s9r, v_ybi)));
+
+                typename simd_vec<C, 8>::f t1r = _mm256_sub_ps(s5r, s6r);
+                typename simd_vec<C, 8>::f t1i = _mm256_sub_ps(s5i, s6i);
+                typename simd_vec<C, 8>::f t4r = _mm256_add_ps(s5r, s6r);
+                typename simd_vec<C, 8>::f t4i = _mm256_add_ps(s5i, s6i);
+
+                typename simd_vec<C, 8>::f s11r = simd_fmadd_ps<C>(s7r, v_ybr, f0r);
+                s11r = simd_fmadd_ps<C>(s8r, v_yar, s11r);
+                typename simd_vec<C, 8>::f s11i = simd_fmadd_ps<C>(s7i, v_ybr, f0i);
+                s11i = simd_fmadd_ps<C>(s8i, v_yar, s11i);
+
+                typename simd_vec<C, 8>::f tmp = _mm256_add_ps(s7r, s8r);
+                f0r = _mm256_add_ps(f0r, tmp);
+                tmp = _mm256_add_ps(s7i, s8i);
+                f0i = _mm256_add_ps(f0i, tmp);
+
+                typename simd_vec<C, 8>::f s12r = simd_fmsub_ps<C>(s9i, v_yai, _mm256_mul_ps(s10i, v_ybi));
+                typename simd_vec<C, 8>::f s12i = simd_fmsub_ps<C>(s10r, v_ybi, _mm256_mul_ps(s9r, v_yai));
+
+                typename simd_vec<C, 8>::f t2r = _mm256_add_ps(s11r, s12r);
+                typename simd_vec<C, 8>::f t2i = _mm256_add_ps(s11i, s12i);
+                typename simd_vec<C, 8>::f t3r = _mm256_sub_ps(s11r, s12r);
+                typename simd_vec<C, 8>::f t3i = _mm256_sub_ps(s11i, s12i);
+
+                _mm256_mask_storeu_ps(F0r + u, mask, f0r);
+                _mm256_mask_storeu_ps(F0i + u, mask, f0i);
+                _mm256_mask_storeu_ps(F1r + u, mask, t1r);
+                _mm256_mask_storeu_ps(F1i + u, mask, t1i);
+                _mm256_mask_storeu_ps(F2r + u, mask, t2r);
+                _mm256_mask_storeu_ps(F2i + u, mask, t2i);
+                _mm256_mask_storeu_ps(F3r + u, mask, t3r);
+                _mm256_mask_storeu_ps(F3i + u, mask, t3i);
+                _mm256_mask_storeu_ps(F4r + u, mask, t4r);
+                _mm256_mask_storeu_ps(F4i + u, mask, t4i);
+            }
+            return;
+        }
+#endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
         if constexpr (C.sse42)
         {
@@ -1421,8 +1705,8 @@ void fft_bfly5_kernel<C>::run(float* Foutr, float* Fouti, int fstride, const flo
                 v_ybi = _mm_set_ps1(ybi); u + 3 < m; u += 4)
             {
                 typename simd_vec<C, 4>::f tw1r, tw1i, tw2r, tw2i, tw3r, tw3i, tw4r, tw4i;
-#if defined(COSYVOICE_HAS_AVX2)
-                if constexpr (C.avx2)
+#if defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+                if constexpr (C.avx2 || C.avx10_1_256)
                 {
                     typename simd_vec<C, 4>::i idx1 = _mm_setr_epi32(
                         u * fstride, (u + 1) * fstride, (u + 2) * fstride, (u + 3) * fstride);
@@ -1664,8 +1948,8 @@ void fft_bfly_generic_kernel<C>::run(float* Foutr, float* Fouti, int            
                 float acc_i = scratchi[0];
 
                 int q = 1;
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-                if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+                if constexpr (C.avx || C.avx10_1_256)
                 {
                     for (; q + 7 < p; q += 8) {
                         int qlocal = q;
@@ -1679,8 +1963,8 @@ void fft_bfly_generic_kernel<C>::run(float* Foutr, float* Fouti, int            
 
                         typename simd_vec<C, 8>::f twr;
                         typename simd_vec<C, 8>::f twi;
-#if defined(COSYVOICE_HAS_AVX2)
-                        if constexpr (C.avx2)
+#if defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+                        if constexpr (C.avx2 || C.avx10_1_256)
                         {
                             typename simd_vec<C, 8>::i vindex = _mm256_loadu_si256((reinterpret_cast<typename simd_vec<C, 8>::i*>(idx)));
                             twr = _mm256_i32gather_ps(twiddles_r, vindex, 4);
@@ -1704,6 +1988,34 @@ void fft_bfly_generic_kernel<C>::run(float* Foutr, float* Fouti, int            
                     }
                 }
 #endif
+                #if defined(COSYVOICE_HAS_AVX10_1_256)
+                if constexpr (C.avx10_1_256)
+                {
+                if (q < p)
+                {
+                    const typename simd_vec<C, 8>::mask mask = simd_tail_mask8<C>(p - q);
+                    int qlocal = q;
+                    alignas(32) int idx[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+                    for (int t = 0; t != static_cast<int>(p - q); ++t, ++qlocal)
+                    {
+                        int idxv = qlocal * step;
+                        if (idxv >= Norig)
+                            idxv %= Norig;
+                        idx[t] = idxv;
+                    }
+                    typename simd_vec<C, 8>::f twr = simd_tail_load8_indexed_ps<C>(twiddles_r, idx, p - q);
+                    typename simd_vec<C, 8>::f twi = simd_tail_load8_indexed_ps<C>(twiddles_i, idx, p - q);
+                    typename simd_vec<C, 8>::f sr = _mm256_maskz_loadu_ps(mask, scratchr + q);
+                    typename simd_vec<C, 8>::f si = _mm256_maskz_loadu_ps(mask, scratchi + q);
+                    typename simd_vec<C, 8>::f tr = simd_fmsub_ps<C>(sr, twr, _mm256_mul_ps(si, twi));
+                    typename simd_vec<C, 8>::f ti = simd_fmadd_ps<C>(sr, twi, _mm256_mul_ps(si, twr));
+                    acc_r += hsum256_ps(tr);
+                    acc_i += hsum256_ps(ti);
+                    q = p;
+                }
+                }
+                else
+                #endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
                 if constexpr (C.sse42)
                 {
@@ -1720,8 +2032,8 @@ void fft_bfly_generic_kernel<C>::run(float* Foutr, float* Fouti, int            
 
                         typename simd_vec<C, 4>::f twr;
                         typename simd_vec<C, 4>::f twi;
-#if defined(COSYVOICE_HAS_AVX2)
-                        if constexpr (C.avx2)
+#if defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+                        if constexpr (C.avx2 || C.avx10_1_256)
                         {
                             typename simd_vec<C, 4>::i vindex = _mm_loadu_si128(reinterpret_cast<typename simd_vec<C, 4>::i*>(idx));
                             twr = _mm_i32gather_ps(twiddles_r, vindex, 4);
@@ -1825,8 +2137,8 @@ void fft_abs_kernel<C>::run(const float* foutr, const float* fouti, float* buffe
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             while (i + 7 < n)
             {
@@ -1836,6 +2148,19 @@ void fft_abs_kernel<C>::run(const float* foutr, const float* fouti, float* buffe
                 _mm256_storeu_ps(buffer + i, abs);
                 i += 8;
             }
+        }
+#endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+            if (i < n)
+            {
+                const typename simd_vec<C, 8>::mask mask = simd_tail_mask8<C>(n - i);
+                typename simd_vec<C, 8>::f tr = _mm256_maskz_loadu_ps(mask, foutr + i);
+                typename simd_vec<C, 8>::f ti = _mm256_maskz_loadu_ps(mask, fouti + i);
+                _mm256_mask_storeu_ps(buffer + i, mask, _mm256_sqrt_ps(simd_fmadd_ps<C>(tr, tr, _mm256_mul_ps(ti, ti))));
+            }
+            return;
         }
 #endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
@@ -1889,8 +2214,8 @@ void init_twiddles_kernel<C>::run(float* twiddles_r, float* twiddles_i, int n, f
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             const typename simd_vec<C, 8>::f factor256 = _mm256_set1_ps(factor);
             typename simd_vec<C, 8>::f _8 = _mm256_set1_ps(8.f);
@@ -1900,10 +2225,28 @@ void init_twiddles_kernel<C>::run(float* twiddles_r, float* twiddles_i, int n, f
                 typename simd_vec<C, 8>::f phase = _mm256_mul_ps(base, factor256);
                 base = _mm256_add_ps(base, _8);
                 typename simd_vec<C, 8>::f sin256, cos256;
-                simd_sincos_ps(phase, &sin256, &cos256);
+                simd_sincos_ps<C>(phase, &sin256, &cos256);
                 _mm256_storeu_ps(twiddles_r + i, cos256);
                 _mm256_storeu_ps(twiddles_i + i, sin256);
             }
+        }
+#endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+            if (i < n)
+            {
+                const typename simd_vec<C, 8>::mask mask = simd_tail_mask8<C>(n - i);
+                const typename simd_vec<C, 8>::f factor256t = _mm256_set1_ps(factor);
+                const typename simd_vec<C, 8>::f base8 = _mm256_setr_ps(static_cast<float>(i), static_cast<float>(i) + 1, static_cast<float>(i) + 2, static_cast<float>(i) + 3,
+                    static_cast<float>(i) + 4, static_cast<float>(i) + 5, static_cast<float>(i) + 6, static_cast<float>(i) + 7);
+                typename simd_vec<C, 8>::f phase = _mm256_mul_ps(base8, factor256t);
+                typename simd_vec<C, 8>::f sin256t, cos256t;
+                simd_sincos_ps<C>(phase, &sin256t, &cos256t);
+                _mm256_mask_storeu_ps(twiddles_r + i, mask, cos256t);
+                _mm256_mask_storeu_ps(twiddles_i + i, mask, sin256t);
+            }
+            return;
         }
 #endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
@@ -1956,8 +2299,8 @@ void safe_divide_kernel<C>::run(float* data, const float* denom, size_t n, float
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             const typename simd_vec<C, 8>::f eps_v = _mm256_set1_ps(min_denom);
             for (; i + 7 < n; i += 8)
@@ -1967,6 +2310,18 @@ void safe_divide_kernel<C>::run(float* data, const float* denom, size_t n, float
                 d = _mm256_max_ps(d, eps_v);
                 _mm256_storeu_ps(data + i, _mm256_div_ps(y, d));
             }
+        }
+#endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+            if (i < n)
+            {
+                const typename simd_vec<C, 8>::mask mask = simd_tail_mask8<C>(n - i);
+                typename simd_vec<C, 8>::f d = _mm256_max_ps(_mm256_maskz_loadu_ps(mask, denom + i), _mm256_set1_ps(min_denom));
+                _mm256_mask_storeu_ps(data + i, mask, _mm256_div_ps(_mm256_maskz_loadu_ps(mask, data + i), d));
+            }
+            return;
         }
 #endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
@@ -2007,11 +2362,23 @@ void apply_window_kernel<C>::run(const float* src, const float* window, float* d
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             for (; i + 7 < n; i += 8)
                 _mm256_storeu_ps(dst + i, _mm256_mul_ps(_mm256_loadu_ps(src + i), _mm256_loadu_ps(window + i)));
+        }
+#endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+            if (i < n)
+            {
+                const typename simd_vec<C, 8>::mask mask = simd_tail_mask8<C>(n - i);
+                _mm256_mask_storeu_ps(dst + i, mask,
+                    _mm256_mul_ps(_mm256_maskz_loadu_ps(mask, src + i), _mm256_maskz_loadu_ps(mask, window + i)));
+            }
+            return;
         }
 #endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
@@ -2047,13 +2414,25 @@ float mel_dot_kernel<C>::run(const float* a, const float* b, size_t n)
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             typename simd_vec<C, 8>::f sum256 = _mm256_setzero_ps();
             for (; i + 7 < n; i += 8)
                 sum256 = simd_fmadd_ps<C>(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i), sum256);
             value = simd_hsum_ps(_mm_add_ps(_mm256_castps256_ps128(sum256), _mm256_extractf128_ps(sum256, 1)));
+        }
+#endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+            if (i < n)
+            {
+                const typename simd_vec<C, 8>::mask mask = simd_tail_mask8<C>(n - i);
+                typename simd_vec<C, 8>::f acc8 = simd_fmadd_ps<C>(_mm256_maskz_loadu_ps(mask, a + i), _mm256_maskz_loadu_ps(mask, b + i), _mm256_setzero_ps());
+                value += hsum256_ps(acc8);
+            }
+            return value;
         }
 #endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
@@ -2098,8 +2477,8 @@ float mel_dot_sq_kernel<C>::run(const float* a, const float* b, size_t n)
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             typename simd_vec<C, 8>::f sum256 = _mm256_setzero_ps();
             for (; i + 7 < n; i += 8)
@@ -2109,6 +2488,20 @@ float mel_dot_sq_kernel<C>::run(const float* a, const float* b, size_t n)
                 sum256 = simd_fmadd_ps<C>(va, _mm256_loadu_ps(b + i), sum256);
             }
             value = simd_hsum_ps(_mm_add_ps(_mm256_castps256_ps128(sum256), _mm256_extractf128_ps(sum256, 1)));
+        }
+#endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+            if (i < n)
+            {
+                const typename simd_vec<C, 8>::mask mask = simd_tail_mask8<C>(n - i);
+                typename simd_vec<C, 8>::f va = _mm256_maskz_loadu_ps(mask, a + i);
+                va = _mm256_mul_ps(va, va);
+                typename simd_vec<C, 8>::f acc8 = simd_fmadd_ps<C>(va, _mm256_maskz_loadu_ps(mask, b + i), _mm256_setzero_ps());
+                value += hsum256_ps(acc8);
+            }
+            return value;
         }
 #endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
@@ -2148,13 +2541,21 @@ float sum_kernel<C>::run(const float* data, size_t n)
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             typename simd_vec<C, 8>::f sum256 = _mm256_setzero_ps();
             for (; i + 7 < n; i += 8)
                 sum256 = _mm256_add_ps(sum256, _mm256_loadu_ps(data + i));
             sum = simd_hsum_ps(_mm_add_ps(_mm256_castps256_ps128(sum256), _mm256_extractf128_ps(sum256, 1)));
+        }
+#endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+            if (i < n)
+                sum += hsum256_ps(_mm256_maskz_loadu_ps(simd_tail_mask8<C>(n - i), data + i));
+            return sum;
         }
 #endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
@@ -2196,16 +2597,28 @@ void log_map_kernel<C>::run(float* data, size_t n, float min_level)
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             const typename simd_vec<C, 8>::f level256 = _mm256_set1_ps(min_level);
             for (; i + 7 < n; i += 8)
             {
                 typename simd_vec<C, 8>::f values = _mm256_loadu_ps(data + i);
                 values = _mm256_max_ps(values, level256);
-                _mm256_storeu_ps(data + i, simd_log_ps(values));
+                _mm256_storeu_ps(data + i, simd_log_ps<C>(values));
             }
+        }
+#endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+            if (i < n)
+            {
+                const typename simd_vec<C, 8>::mask mask = simd_tail_mask8<C>(n - i);
+                typename simd_vec<C, 8>::f values = _mm256_max_ps(_mm256_maskz_loadu_ps(mask, data + i), _mm256_set1_ps(min_level));
+                _mm256_mask_storeu_ps(data + i, mask, simd_log_ps<C>(values));
+            }
+            return;
         }
 #endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
@@ -2253,8 +2666,8 @@ float log10_map_kernel<C>::run(float* data, size_t n, float min_level)
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             const typename simd_vec<C, 8>::f level256 = _mm256_set1_ps(min_level);
             typename simd_vec<C, 8>::f maximum_256 = _mm256_set1_ps(min_level);
@@ -2262,11 +2675,24 @@ float log10_map_kernel<C>::run(float* data, size_t n, float min_level)
             {
                 typename simd_vec<C, 8>::f values = _mm256_loadu_ps(data + i);
                 values = _mm256_max_ps(values, level256);
-                values = simd_log10_ps(values);
+                values = simd_log10_ps<C>(values);
                 _mm256_storeu_ps(data + i, values);
                 maximum_256 = _mm256_max_ps(maximum_256, values);
             }
             max_value = std::max(max_value, hmax_ps(maximum_256));
+        }
+#endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+            if (i < n)
+            {
+                const typename simd_vec<C, 8>::mask mask = simd_tail_mask8<C>(n - i);
+                typename simd_vec<C, 8>::f values = simd_log10_ps<C>(_mm256_max_ps(_mm256_maskz_loadu_ps(mask, data + i), _mm256_set1_ps(min_level)));
+                _mm256_mask_storeu_ps(data + i, mask, values);
+                max_value = std::max(max_value, hmax_ps(values)); // invalid lanes: log10(min_level) below any running max
+            }
+            return max_value;
         }
 #endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
@@ -2321,8 +2747,8 @@ void spec_normalize_kernel<C>::run(float* data, size_t n, float base)
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             const typename simd_vec<C, 8>::f base256 = _mm256_set1_ps(base);
             const typename simd_vec<C, 8>::f four256 = _mm256_set1_ps(4.f);
@@ -2333,6 +2759,18 @@ void spec_normalize_kernel<C>::run(float* data, size_t n, float base)
                 values = _mm256_add_ps(values, four256);
                 _mm256_storeu_ps(data + i, _mm256_div_ps(values, four256));
             }
+        }
+#endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+            if (i < n)
+            {
+                const typename simd_vec<C, 8>::mask mask = simd_tail_mask8<C>(n - i);
+                typename simd_vec<C, 8>::f values = _mm256_add_ps(_mm256_max_ps(_mm256_maskz_loadu_ps(mask, data + i), _mm256_set1_ps(base)), _mm256_set1_ps(4.f));
+                _mm256_mask_storeu_ps(data + i, mask, _mm256_div_ps(values, _mm256_set1_ps(4.f)));
+            }
+            return;
         }
 #endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
@@ -2379,12 +2817,23 @@ void sub_mean_kernel<C>::run(float* dst, const float* src, size_t n, float mean)
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             const typename simd_vec<C, 8>::f mean256 = _mm256_set1_ps(mean);
             for (; i + 7 < n; i += 8)
                 _mm256_storeu_ps(dst + i, _mm256_sub_ps(_mm256_loadu_ps(src + i), mean256));
+        }
+#endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+            if (i < n)
+            {
+                const typename simd_vec<C, 8>::mask mask = simd_tail_mask8<C>(n - i);
+                _mm256_mask_storeu_ps(dst + i, mask, _mm256_sub_ps(_mm256_maskz_loadu_ps(mask, src + i), _mm256_set1_ps(mean)));
+            }
+            return;
         }
 #endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
@@ -2430,8 +2879,8 @@ void preemph_gain_kernel<C>::run(float* frames, const float* prev, const float* 
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             const typename simd_vec<C, 8>::f factor256 = _mm256_set1_ps(0.97f);
             for (; i + 7 < n; i += 8)
@@ -2442,6 +2891,21 @@ void preemph_gain_kernel<C>::run(float* frames, const float* prev, const float* 
                 vframes = _mm256_mul_ps(vframes, _mm256_loadu_ps(window + (i % win_size)));
                 _mm256_storeu_ps(frames + i, vframes);
             }
+        }
+#endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+            if (i < n)
+            {
+                const typename simd_vec<C, 8>::mask mask = simd_tail_mask8<C>(n - i);
+                typename simd_vec<C, 8>::f vframes = _mm256_maskz_loadu_ps(mask, frames + i);
+                typename simd_vec<C, 8>::f vprev = _mm256_maskz_loadu_ps(mask, prev + i);
+                vframes = _mm256_sub_ps(vframes, _mm256_mul_ps(vprev, _mm256_set1_ps(0.97f)));
+                vframes = _mm256_mul_ps(vframes, _mm256_maskz_loadu_ps(mask, window + (i % win_size)));
+                _mm256_mask_storeu_ps(frames + i, mask, vframes);
+            }
+            return;
         }
 #endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
@@ -2486,14 +2950,26 @@ void square_store_kernel<C>::run(const float* src, float* dst, size_t n)
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             for (; i + 7 < n; i += 8)
             {
                 typename simd_vec<C, 8>::f v = _mm256_loadu_ps(src + i);
                 _mm256_storeu_ps(dst + i, _mm256_mul_ps(v, v));
             }
+        }
+#endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+            if (i < n)
+            {
+                const typename simd_vec<C, 8>::mask mask = simd_tail_mask8<C>(n - i);
+                typename simd_vec<C, 8>::f v = _mm256_maskz_loadu_ps(mask, src + i);
+                _mm256_mask_storeu_ps(dst + i, mask, _mm256_mul_ps(v, v));
+            }
+            return;
         }
 #endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
@@ -2553,12 +3029,12 @@ void column_mean_sub_kernel<C>::run(float* column, size_t rows, size_t stride)
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             typename simd_vec<C, 8>::f sum256 = _mm256_setzero_ps();
-#if defined(COSYVOICE_HAS_AVX2)
-            if constexpr (C.avx2)
+#if defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+            if constexpr (C.avx2 || C.avx10_1_256)
             {
                 typename simd_vec<C, 8>::i stride256 = _mm256_set1_epi32(static_cast<int>(stride));
                 typename simd_vec<C, 8>::i stride8v = _mm256_set1_epi32(static_cast<int>(8 * stride));
@@ -2577,12 +3053,20 @@ void column_mean_sub_kernel<C>::run(float* column, size_t rows, size_t stride)
             sum = simd_hsum_ps(_mm_add_ps(_mm256_castps256_ps128(sum256), _mm256_extractf128_ps(sum256, 1)));
         }
 #endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+            if (i < rows)
+                sum += hsum256_ps(simd_tail_load8_strided_ps<C>(column + i * stride, static_cast<int>(stride), rows - i));
+            i = rows;
+        }
+#endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
         if constexpr (C.sse42)
         {
             typename simd_vec<C, 4>::f sum128 = _mm_setzero_ps();
-#if defined(COSYVOICE_HAS_AVX2)
-            if constexpr (C.avx2)
+#if defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+            if constexpr (C.avx2 || C.avx10_1_256)
             {
                 typename simd_vec<C, 4>::i stride128 = _mm_set1_epi32(static_cast<int>(stride));
                 typename simd_vec<C, 4>::i stride4v = _mm_set1_epi32(static_cast<int>(4 * stride));
@@ -2608,11 +3092,11 @@ void column_mean_sub_kernel<C>::run(float* column, size_t rows, size_t stride)
         const float mean = sum / static_cast<float>(rows);
 
         i = 0;
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
-#if defined(COSYVOICE_HAS_AVX2)
-            if constexpr (C.avx2)
+#if defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+            if constexpr (C.avx2 || C.avx10_1_256)
             {
                 typename simd_vec<C, 8>::i stride256 = _mm256_set1_epi32(static_cast<int>(stride));
                 typename simd_vec<C, 8>::i stride8v = _mm256_set1_epi32(static_cast<int>(8 * stride));
@@ -2646,12 +3130,27 @@ void column_mean_sub_kernel<C>::run(float* column, size_t rows, size_t stride)
             }
         }
 #endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+            if (i < rows)
+            {
+                typename simd_vec<C, 8>::f v = _mm256_sub_ps(simd_tail_load8_strided_ps<C>(column + i * stride, static_cast<int>(stride), rows - i), _mm256_set1_ps(mean));
+                alignas(32) float values[8];
+                _mm256_store_ps(values, v);
+                float* row = column + i * stride;
+                for (size_t k = 0; i + k < rows; ++k)
+                    row[k * stride] = values[k];
+            }
+            i = rows;
+        }
+#endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
         if constexpr (C.sse42)
         {
             const typename simd_vec<C, 4>::f mean128 = _mm_set_ps1(mean);
-#if defined(COSYVOICE_HAS_AVX2)
-            if constexpr (C.avx2)
+#if defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+            if constexpr (C.avx2 || C.avx10_1_256)
             {
                 typename simd_vec<C, 4>::i stride128 = _mm_set1_epi32(static_cast<int>(stride));
                 typename simd_vec<C, 4>::i stride4v = _mm_set1_epi32(static_cast<int>(4 * stride));
@@ -2673,12 +3172,15 @@ void column_mean_sub_kernel<C>::run(float* column, size_t rows, size_t stride)
             else
 #endif
             {
-                typename simd_vec<C, 4>::f v = _mm_sub_ps(simd_load4_strided_ps<C>(column + i * stride, static_cast<int>(stride)), mean128);
-                alignas(16) float values[4];
-                _mm_store_ps(values, v);
-                float* row = column + i * stride;
-                for (int k = 0; k != 4; ++k)
-                    row[k * stride] = values[k];
+                for (; i + 3 < rows; i += 4)
+                {
+                    typename simd_vec<C, 4>::f v = _mm_sub_ps(simd_load4_strided_ps<C>(column + i * stride, static_cast<int>(stride)), mean128);
+                    alignas(16) float values[4];
+                    _mm_store_ps(values, v);
+                    float* row = column + i * stride;
+                    for (int k = 0; k != 4; ++k)
+                        row[k * stride] = values[k];
+                }
             }
         }
 #endif
@@ -2707,8 +3209,8 @@ void div_kernel<C>::run(float* data, size_t n, float divisor)
     else
 #endif
     {
-#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
-        if constexpr (C.avx)
+#if defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2) || defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx || C.avx10_1_256)
         {
             const typename simd_vec<C, 8>::f div256 = _mm256_set1_ps(divisor);
             for (; i + 7 < n; i += 8)
@@ -2717,6 +3219,17 @@ void div_kernel<C>::run(float* data, size_t n, float divisor)
                 values = _mm256_div_ps(values, div256);
                 _mm256_storeu_ps(data + i, values);
             }
+        }
+#endif
+#if defined(COSYVOICE_HAS_AVX10_1_256)
+        if constexpr (C.avx10_1_256)
+        {
+            if (i < n)
+            {
+                const typename simd_vec<C, 8>::mask mask = simd_tail_mask8<C>(n - i);
+                _mm256_mask_storeu_ps(data + i, mask, _mm256_div_ps(_mm256_maskz_loadu_ps(mask, data + i), _mm256_set1_ps(divisor)));
+            }
+            return;
         }
 #endif
 #if defined(COSYVOICE_HAS_SSE42) || defined(COSYVOICE_HAS_AVX) || defined(COSYVOICE_HAS_AVX2)
