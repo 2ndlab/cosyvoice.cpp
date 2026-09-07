@@ -138,7 +138,7 @@ COSYVOICE_API cosyvoice_context_t cosyvoice_load_from_file_ext(
     const cosyvoice_context_params_t* params,
     ggml_backend_t                    backend,
     uint32_t                          n_threads,
-    uint32_t                          reserved
+    uint32_t                          params_version
 );
 ```
 
@@ -149,10 +149,10 @@ COSYVOICE_API cosyvoice_context_t cosyvoice_load_from_file_ext(
 ### 参数
 
 - `filename`：模型文件路径。
-- `params`：上下文参数。
+- `params`：上下文参数。当 `params_version` 选择扩展布局时，传入其内嵌 `base_params` 成员的指针（`base_params` 是首成员，直接传整个结构体的地址也可）。
 - `backend`：可选后端句柄。
 - `n_threads`：CPU 线程数；传 `0` 时在可用情况下使用硬件并发数。
-- `reserved`：保留参数，传 `0`。
+- `params_version`：上下文参数版本。`COSYVOICE_CONTEXT_PARAMS_VERSION`（`0`）对应 `cosyvoice_context_params_t`；`COSYVOICE_CONTEXT_PARAMS_V2_VERSION`（`1`）对应 `cosyvoice_context_params_v2_t`；`COSYVOICE_CONTEXT_PARAMS_V3_VERSION`（`2`）对应 `cosyvoice_context_params_v3_t`。
 
 ### 返回值
 
@@ -163,6 +163,7 @@ COSYVOICE_API cosyvoice_context_t cosyvoice_load_from_file_ext(
 - 该接口在 GGML 动态库与静态库构建下都可用。
 - `backend == NULL` 表示自动选择后端。
 - 如果 `backend != NULL`，其所有权会转移给创建出的上下文，并在 `cosyvoice_free()` 时自动释放。
+- C++ 下本函数另有模板重载（4 个参数，不传 `params_version`），按 `params` 的静态类型自动推导版本——接受 `cosyvoice_context_params_t`、`..._v2_t`、`..._v3_t` 及扁平的 C++ 变体 `..._v2_cpp` / `..._v3_cpp`。
 
 ## cosyvoice_load_ext
 
@@ -190,7 +191,7 @@ COSYVOICE_API cosyvoice_context_t cosyvoice_load_ext(
 - `params`：上下文参数。
 - `backend`：可选后端句柄。
 - `n_threads`：CPU 线程数；传 `0` 时自动使用硬件并发数。
-- `params_version`：上下文参数版本。传 `COSYVOICE_CONTEXT_PARAMS_V2_VERSION` 将 `params` 解释为 `cosyvoice_context_params_v2_t`，传 `0` 则为 `cosyvoice_context_params_t`。
+- `params_version`：上下文参数版本。`COSYVOICE_CONTEXT_PARAMS_VERSION`（`0`）对应 `cosyvoice_context_params_t`，`COSYVOICE_CONTEXT_PARAMS_V2_VERSION`（`1`）对应 `cosyvoice_context_params_v2_t`，`COSYVOICE_CONTEXT_PARAMS_V3_VERSION`（`2`）对应 `cosyvoice_context_params_v3_t`（传内嵌 base 指针）。
 
 ### 返回值
 

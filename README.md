@@ -49,7 +49,7 @@ This project provides:
 | **Inference Interruption** | Press `Ctrl+C` in CLI or disconnect from the server to stop generation as soon as possible — output up to that point remains valid |
 | **Model Quantization** | Quantize GGUF models to smaller formats (Q2_K through F16) with the built-in `quantize` tool |
 | **Streaming TTS** | Real-time speech generation with low-latency audio delivery via callback — delivers audio chunks as they are synthesized, before the full utterance completes |
-| **DiT KV Cache** | Avoid redundant attention recomputation across diffusion steps during streaming — configurable with fixed (device), offloadable (CPU), and uncached slot categories to trade memory vs. speed |
+| **DiT KV Cache** | Reuses attention key/values of already-emitted positions per diffusion step during streaming, so each new chunk computes only its fresh positions — configurable fixed (device), offloadable (CPU), and uncached slot categories to trade memory vs. speed |
 | **Flash Attention** | LLM and Flow flash attention support (`--llm-flash-attn`, `--flow-flash-attn`) for reduced memory and faster inference when the backend supports it |
 | **Chunk Tokens Control** | Tune streaming latency vs. overhead tradeoff via `--chunk-tokens` — smaller chunks reduce first-chunk latency, larger chunks reduce RTF |
 | **KV Cache Quantization** | Reduce LLM memory usage via `--llm-kv-cache-type` (f32 / f16 / q8_0 / q5_1 / q4_0 / ...). Supports asymmetric quantization with separate K/V types (e.g. `k=q8_0,v=q4_0`). |
@@ -345,7 +345,7 @@ License reminder:
 
 Streaming TTS delivers audio chunks incrementally via a callback function as they are synthesized, without waiting for the full utterance to complete. This enables real-time playback and lower perceived latency.
 
-The streaming pipeline introduces a **DiT KV cache** to avoid redundant computation. During non-streaming inference, the DiT module runs 10 diffusion steps, each computing self-attention over the full audio sequence — resulting in 10× attention recomputation. The KV cache stores intermediate key/value tensors across steps so that each position is computed only once.
+Each chunk runs the DiT's 10 diffusion steps — without caching, every step of every new chunk recomputes attention over the whole sequence emitted so far. The **DiT KV cache** keeps the attention key/values of already-emitted positions **per diffusion step** (each step has its own cache slot), so a new chunk only computes its fresh positions: every cached position is processed once per step, then reused by all later chunks.
 
 ### Slot Organization
 
@@ -359,11 +359,7 @@ Slots fall into three categories:
 | **Offloadable** | Offloaded to CPU when not in use | Saves device memory at the cost of transfer latency |
 | **Uncached** | Not stored at all | Full attention recomputation every step, no extra memory |
 
-**Step-to-slot mapping.** The diffusion steps are laid out in order: uncached steps first, then offloadable steps, then fixed steps. Each **fixed** step gets its own dedicated device slot. All **offloadable** steps share a single scratch slot (device slot 0): a step computes into it, immediately copies the KV to its own CPU buffer, and the next step copies it back — so offloading needs only one device slot, plus one CPU buffer per offloadable step.
-
-**Automatic normalization.** A single offloadable slot (`fixed=0, offloadable=1`) is converted to a fixed slot (`fixed=1, offloadable=0`): one CPU round-trip per chunk plus a scratch slot is strictly more expensive than just keeping it resident. Both counts are also clamped so `fixed + offloadable` never exceeds the 10 diffusion steps.
-
-Total cached steps = `fixed + offloadable`. Remaining steps (10 − total) use full recomputation.
+**Step-to-slot mapping.** Steps are laid out in order — uncached first, then offloadable (all sharing one device scratch slot, each with its own CPU buffer), then fixed (one dedicated device slot each). A configuration with exactly one offloadable slot is normalized to fixed (`offloadable=1 → fixed+1`), and both counts are clamped so `fixed + offloadable` never exceeds the 10 diffusion steps. Total cached steps = `fixed + offloadable`; the rest recompute fully. Internal slot/scheduling layout: [docs/API_cosyvoice.md — DiT KV Cache Concept](docs/API_cosyvoice.md#dit-kv-cache-concept).
 
 The cache is large, so the default is 0 slots (all 10 steps fully recomputed). When enabled and the sequence exceeds the configured cache length, some positions are discarded — inference continues normally but output quality may degrade. Offloadable slots transfer data between device and CPU, which may not improve speed and can be slower than full recomputation depending on bandwidth.
 
@@ -371,12 +367,12 @@ The cache is large, so the default is 0 slots (all 10 steps fully recomputed). W
 
 ### Configuration
 
-DiT KV cache parameters are configured via CLI/server `--dit-kv-*` flags:
+DiT KV cache parameters are configured via CLI/server `--dit-kv-*` flags (context parameters — on the CLI they apply to interactive/streaming mode):
 
-- `--dit-kv-cache-type`: Storage format (f32/f16/q8_0/...) for the DiT KV cache.
-- `--dit-kv-fixed-slots`: Number of device-resident slots.
-- `--dit-kv-offloadable-slots`: Number of CPU-offloadable slots.
-- `--dit-kv-cache-length`: Maximum sequence positions kept in the cache.
+- `--dit-kv-cache-type`: Storage format for the cache — `f32`/`f16`/`q8_0`/`q5_1`/`q5_0`/`q4_1`/`q4_0`, or asymmetric with separate K and V formats (`k=<type>,v=<type>[,fallback=<type>]`, same style as `--llm-kv-cache-type`).
+- `--dit-kv-fixed-slots`: Number of device-resident slots. Default: `0`.
+- `--dit-kv-offloadable-slots`: Number of CPU-offloadable slots. Default: `0`.
+- `--dit-kv-cache-length`: Maximum sequence positions kept in the cache. Default: `0` = max LLM length × 10.
 
 Suggested starting points (10 diffusion steps total):
 
@@ -473,6 +469,8 @@ Current backend test results are as follows:
 
 ## Third-Party Notices
 - See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for bundled dependency license details.
+- Core tensor compute library: **GGML** (MIT, vendored/auto-cloned) — the foundation split out of llama.cpp; a small Metal patch is applied at build time.
+- **llama.cpp** (MIT): tokenizer implementation adapted from it; **ONNX Runtime** (MIT), **ICU** (Unicode license), and **SIMDe** (MIT, optional) power the frontend and SIMD emulation.
 - FFT implementation references/adapts KissFFT (BSD-3-Clause) with project-specific SIMD optimizations; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 - Tokenizer implementation is adapted from llama.cpp (MIT).
 
