@@ -210,7 +210,7 @@ Refer to the [GGML documentation](https://github.com/ggml-org/llama.cpp/blob/mas
 The Metal PAD beg-padding patch in `cmake/patches/ggml-metal-pad-beg.patch` is written against a specific ggml snapshot. If ggml is allowed to float to the latest master while Metal is enabled, line drift / kernel rewrites regularly break `git apply`, silently disabling Metal PAD support. To keep the patch valid, the build system pins the ggml commit — but only for Metal builds, so other backends keep using the latest ggml as before.
 
 - `GGML_METAL` defaults to **ON on Apple Silicon** (see ggml's own CMakeLists) and can be forced with `-DGGML_METAL=ON/OFF`.
-- **Metal builds** (default on Apple Silicon): GGML is pinned to commit `af97976c7810cdabb1863172f31c432dab767de7` (configurable via `GGML_PINNED_COMMIT` in `cmake/Dependencies.cmake`). CMake checks out that commit after cloning, warns (without failing) if an existing `vendor/ggml` checkout has drifted, and applies `cmake/patches/ggml-metal-pad-beg.patch` idempotently (skipped if already applied).
+- **Metal builds** (default on Apple Silicon): GGML is pinned to commit `e91ded11bdcd78c42f9c8d3978ff6686eb4c1226` (v0.23.0; configurable via `GGML_PINNED_COMMIT` in `cmake/Dependencies.cmake`). CMake checks out that commit after cloning, warns (without failing) if an existing `vendor/ggml` checkout has drifted, and applies `cmake/patches/ggml-metal-pad-beg.patch` idempotently (skipped if already applied).
 - **Non-Metal builds**: unchanged behavior — the latest ggml master is shallow-cloned (`--depth=1`) and no patch is applied.
 
 ```bash

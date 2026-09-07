@@ -210,7 +210,7 @@ cmake -B build -DGGML_VULKAN=ON
 `cmake/patches/ggml-metal-pad-beg.patch`（Metal PAD beg-padding 补丁）是针对特定 ggml 快照编写的。若 Metal 开启而 ggml 漂移到最新 master，`git apply` 会因行偏移/内核重写而失败，从而静默禁用 Metal PAD 支持。为保证补丁始终有效，构建系统会对 ggml 固定提交号——但仅在 Metal 构建时生效，其他后端仍像以前一样使用最新 ggml。
 
 - `GGML_METAL` 在 Apple Silicon 上**默认为 ON**（见 ggml 自身 CMakeLists），也可用 `-DGGML_METAL=ON/OFF` 强制指定。
-- **Metal 构建**（Apple Silicon 默认）：GGML 被固定到提交 `af97976c7810cdabb1863172f31c432dab767de7`（可通过 `cmake/Dependencies.cmake` 中的 `GGML_PINNED_COMMIT` 配置）。CMake 会在克隆后自动 checkout 该提交；若已有 `vendor/ggml` 检出偏离固定提交，仅警告而不中断；并幂等应用 `cmake/patches/ggml-metal-pad-beg.patch`（已应用则跳过）。
+- **Metal 构建**（Apple Silicon 默认）：GGML 被固定到提交 `e91ded11bdcd78c42f9c8d3978ff6686eb4c1226`（v0.23.0，可通过 `cmake/Dependencies.cmake` 中的 `GGML_PINNED_COMMIT` 配置）。CMake 会在克隆后自动 checkout 该提交；若已有 `vendor/ggml` 检出偏离固定提交，仅警告而不中断；并幂等应用 `cmake/patches/ggml-metal-pad-beg.patch`（已应用则跳过）。
 - **非 Metal 构建**：行为不变——浅克隆（`--depth=1`）最新 master，不应用任何补丁。
 
 ```bash
