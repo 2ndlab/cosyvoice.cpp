@@ -124,7 +124,7 @@ cmake -S /path/to/cosyvoice.cpp -B build-android-cpu \
 | `ANDROID_PLATFORM` | Minimum Android API level |
 | `ANDROID_ABI` | `arm64-v8a` |
 | `ANDROID_STL` | C++ runtime library |
-| `SIMDE_INCLUDE_DIR` | SIMDe directory, must contain `simde/x86/avx2.h` |
+| `SIMDE_INCLUDE_DIR` | SIMDe directory (contains `simde/`), optional; without it the build is scalar-only |
 | `COSYVOICE_NO_FRONTEND` | ONNX Runtime has no Android prebuilt, disable |
 | `COSYVOICE_NO_ICU` | ICU has no Android prebuilt, disable |
 
