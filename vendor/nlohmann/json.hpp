@@ -223,9 +223,12 @@
 
 
 #include <array> // array
+#include <cmath> // isnan, ldexp, trunc
 #include <cstddef> // size_t
 #include <cstdint> // uint8_t
+#include <limits> // numeric_limits
 #include <string> // string
+#include <type_traits> // is_signed
 
 // #include <nlohmann/detail/macro_scope.hpp>
 //     __ _____ _____ _____
@@ -3282,6 +3285,68 @@ inline bool operator<(const value_t lhs, const value_t rhs) noexcept
     return std::is_lt(lhs <=> rhs); // *NOPAD*
 }
 #endif
+
+
+/*!
+@brief compare an integer with a floating point number without precision loss
+
+Widening the integer to the floating point type loses precision beyond the
+float's mantissa, which makes equality intransitive: both 2^63-2 and 2^63-1
+round to 2^63, so each compares equal to that float while differing from each
+other. Ordering built on that is not a strict weak ordering, so sorting such
+values, or using them as keys in an ordered container, is undefined behavior.
+
+Returns a value to be compared against zero with the original operator, which
+reproduces the exact ordering. A NaN operand is returned as is, so comparing it
+against zero keeps NaN's semantics: false for the relational operators and
+unordered for `<=>`.
+*/
+template<typename IntegerType, typename FloatType>
+FloatType compare_integer_with_float(const IntegerType i, const FloatType f) noexcept
+{
+    const auto ordered = [](int c) noexcept
+    {
+        return static_cast<FloatType>(c);
+    };
+
+    if (std::isnan(f))
+    {
+        return f;
+    }
+
+    // values of IntegerType lie in [-bound, bound) when signed and in
+    // [0, bound) when unsigned; digits excludes the sign bit, so bound is a
+    // power of two that the float represents exactly
+    const FloatType bound = std::ldexp(static_cast<FloatType>(1), std::numeric_limits<IntegerType>::digits);
+    if (f >= bound)
+    {
+        return ordered(-1);
+    }
+    if (std::is_signed<IntegerType>::value ? (f < -bound) : (f < static_cast<FloatType>(0)))
+    {
+        return ordered(1);
+    }
+
+    // f is now within the integer's range, so truncating it is exact
+    const FloatType truncated = std::trunc(f);
+    const auto as_integer = static_cast<IntegerType>(truncated);
+    if (i != as_integer)
+    {
+        return ordered(i < as_integer ? -1 : 1);
+    }
+
+    // the integer parts agree, so any fractional part decides
+    const FloatType fraction = f - truncated;
+    if (fraction > static_cast<FloatType>(0))
+    {
+        return ordered(-1);
+    }
+    if (fraction < static_cast<FloatType>(0))
+    {
+        return ordered(1);
+    }
+    return ordered(0);
+}
 
 }  // namespace detail
 NLOHMANN_JSON_NAMESPACE_END
@@ -11395,7 +11460,13 @@ class binary_reader
             case 0xBF: // map (indefinite length)
                 return get_cbor_object(detail::unknown_size(), tag_handler);
 
-            case 0xC6: // tagged item
+            case 0xC0: // tagged item
+            case 0xC1:
+            case 0xC2:
+            case 0xC3:
+            case 0xC4:
+            case 0xC5:
+            case 0xC6:
             case 0xC7:
             case 0xC8:
             case 0xC9:
@@ -11410,6 +11481,9 @@ class binary_reader
             case 0xD2:
             case 0xD3:
             case 0xD4:
+            case 0xD5:
+            case 0xD6:
+            case 0xD7:
             case 0xD8: // tagged item (1 byte follows)
             case 0xD9: // tagged item (2 bytes follow)
             case 0xDA: // tagged item (4 bytes follow)
@@ -17747,7 +17821,10 @@ class binary_writer
                 bool prefix_required = true;
                 if (use_type && !j.m_data.m_value.array->empty())
                 {
-                    JSON_ASSERT(use_count);
+                    if (!use_count)
+                    {
+                        JSON_THROW(other_error::create(502, "use_type requires use_size = true", &j));
+                    }
                     const CharType first_prefix = ubjson_prefix(j.front(), use_bjdata);
                     const bool same_prefix = std::all_of(j.begin() + 1, j.end(),
                                                          [this, first_prefix, use_bjdata](const BasicJsonType & v)
@@ -17793,7 +17870,10 @@ class binary_writer
 
                 if (use_type && (bjdata_draft3 || !j.m_data.m_value.binary->empty()))
                 {
-                    JSON_ASSERT(use_count);
+                    if (!use_count)
+                    {
+                        JSON_THROW(other_error::create(502, "use_type requires use_size = true", &j));
+                    }
                     oa->write_character(to_char_type('$'));
                     oa->write_character(bjdata_draft3 ? 'B' : 'U');
                 }
@@ -17845,7 +17925,10 @@ class binary_writer
                 bool prefix_required = true;
                 if (use_type && !j.m_data.m_value.object->empty())
                 {
-                    JSON_ASSERT(use_count);
+                    if (!use_count)
+                    {
+                        JSON_THROW(other_error::create(502, "use_type requires use_size = true", &j));
+                    }
                     const CharType first_prefix = ubjson_prefix(j.front(), use_bjdata);
                     const bool same_prefix = std::all_of(j.begin(), j.end(),
                                                          [this, first_prefix, use_bjdata](const BasicJsonType & v)
@@ -18593,6 +18676,15 @@ class binary_writer
         CharType dtype = it->second;
 
         key = "_ArraySize_";
+        // the dimensions are written verbatim as the header length below, so a
+        // value that is not an array cannot produce a valid one: null emits 'Z'
+        // and an object emits '{', neither of which a reader accepts after '#'.
+        // Such an object is not a valid ndarray and falls back to a plain object.
+        if (!value.at(key).is_array())
+        {
+            return true;
+        }
+
         std::size_t len = (value.at(key).empty() ? 0 : 1);
         for (const auto& el : value.at(key))
         {
@@ -24852,7 +24944,10 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
             if (merge_objects && it.value().is_object())
             {
                 auto it2 = m_data.m_value.object->find(it.key());
-                if (it2 != m_data.m_value.object->end())
+                // Only recurse when the existing value is itself an object.
+                // Otherwise overwrite, matching the documented "all other values
+                // are overwritten as usual" behavior (see #5402).
+                if (it2 != m_data.m_value.object->end() && it2->second.is_object())
                 {
                     it2->second.update(it.value(), true);
 #if JSON_DIAGNOSTICS
@@ -24988,6 +25083,12 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
 
     // note parentheses around operands are necessary; see
     // https://github.com/nlohmann/json/issues/1530
+    // Mixed signed/unsigned integer comparisons check whether the signed value
+    // is negative before casting. If it is, the comparison is performed with
+    // the fixed values -1 and 1, which preserves the ordering relationship
+    // because any negative signed value is smaller than any unsigned value.
+    // Otherwise, the non-negative signed value is cast to unsigned before the
+    // comparison to avoid wraparound.
 #define JSON_IMPLEMENT_OPERATOR(op, null_result, unordered_result, default_result)                       \
     const auto lhs_type = lhs.type();                                                                    \
     const auto rhs_type = rhs.type();                                                                    \
@@ -25030,28 +25131,32 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
     }                                                                                                    \
     else if (lhs_type == value_t::number_integer && rhs_type == value_t::number_float)                   \
     {                                                                                                    \
-        return static_cast<number_float_t>(lhs.m_data.m_value.number_integer) op rhs.m_data.m_value.number_float;      \
+        return (detail::compare_integer_with_float(lhs.m_data.m_value.number_integer, rhs.m_data.m_value.number_float)) op (static_cast<number_float_t>(0)); \
     }                                                                                                    \
     else if (lhs_type == value_t::number_float && rhs_type == value_t::number_integer)                   \
     {                                                                                                    \
-        return lhs.m_data.m_value.number_float op static_cast<number_float_t>(rhs.m_data.m_value.number_integer);      \
+        return (static_cast<number_float_t>(0)) op (detail::compare_integer_with_float(rhs.m_data.m_value.number_integer, lhs.m_data.m_value.number_float)); \
     }                                                                                                    \
     else if (lhs_type == value_t::number_unsigned && rhs_type == value_t::number_float)                  \
     {                                                                                                    \
-        return static_cast<number_float_t>(lhs.m_data.m_value.number_unsigned) op rhs.m_data.m_value.number_float;     \
+        return (detail::compare_integer_with_float(lhs.m_data.m_value.number_unsigned, rhs.m_data.m_value.number_float)) op (static_cast<number_float_t>(0)); \
     }                                                                                                    \
     else if (lhs_type == value_t::number_float && rhs_type == value_t::number_unsigned)                  \
     {                                                                                                    \
-        return lhs.m_data.m_value.number_float op static_cast<number_float_t>(rhs.m_data.m_value.number_unsigned);     \
+        return (static_cast<number_float_t>(0)) op (detail::compare_integer_with_float(rhs.m_data.m_value.number_unsigned, lhs.m_data.m_value.number_float)); \
     }                                                                                                    \
     else if (lhs_type == value_t::number_unsigned && rhs_type == value_t::number_integer)                \
     {                                                                                                    \
-        return static_cast<number_integer_t>(lhs.m_data.m_value.number_unsigned) op rhs.m_data.m_value.number_integer; \
+        return (rhs.m_data.m_value.number_integer < 0)                                                   \
+               ? (number_integer_t(1) op number_integer_t(-1))                                           \
+               : (lhs.m_data.m_value.number_unsigned op static_cast<number_unsigned_t>(rhs.m_data.m_value.number_integer)); \
     }                                                                                                    \
     else if (lhs_type == value_t::number_integer && rhs_type == value_t::number_unsigned)                \
     {                                                                                                    \
-        return lhs.m_data.m_value.number_integer op static_cast<number_integer_t>(rhs.m_data.m_value.number_unsigned); \
-    }                                                                                                    \
+        return (lhs.m_data.m_value.number_integer < 0)                                                   \
+               ? (number_integer_t(-1) op number_integer_t(1))                                           \
+               : (static_cast<number_unsigned_t>(lhs.m_data.m_value.number_integer) op rhs.m_data.m_value.number_unsigned); \
+    }                                                                                             \
     else if(compares_unordered(lhs, rhs))\
     {\
         return (unordered_result);\
@@ -26451,19 +26556,17 @@ class basic_json // NOLINT(cppcoreguidelines-special-member-functions,hicpp-spec
                 // We now reached the end of at least one array
                 // in a second pass, traverse the remaining elements
 
-                // remove my remaining elements
-                const auto end_index = static_cast<difference_type>(result.size());
-                while (i < source.size())
+                // remove my remaining elements, highest index first; appending
+                // in that order avoids the quadratic reinsertion done before
+                for (std::size_t j = source.size(); j > i; --j)
                 {
-                    // add operations in reverse order to avoid invalid
-                    // indices
-                    result.insert(result.begin() + end_index, object(
+                    result.push_back(object(
                     {
                         {"op", "remove"},
-                        {"path", detail::concat<string_t>(path, '/', detail::to_string<string_t>(i))}
+                        {"path", detail::concat<string_t>(path, '/', detail::to_string<string_t>(j - 1))}
                     }));
-                    ++i;
                 }
+                i = source.size();
 
                 // add other remaining elements
                 while (i < target.size())
