@@ -1,4 +1,4 @@
-# Android 构建指南
+﻿# Android 构建指南
 
 ## Termux（手机上直接编译）
 
@@ -119,7 +119,7 @@ cmake -S /path/to/cosyvoice.cpp -B build-android-cpu \
 | `ANDROID_PLATFORM` | 最低 Android API 级别 |
 | `ANDROID_ABI` | arm64-v8a |
 | `ANDROID_STL` | C++ 运行时库 |
-| `SIMDE_INCLUDE_DIR` | SIMDe 目录，需包含 `simde/x86/avx2.h` |
+| `SIMDE_INCLUDE_DIR` | SIMDe 目录（含 `simde/`），可选；不提供时构建自动降级为纯标量 |
 | `COSYVOICE_NO_FRONTEND` | ONNX Runtime 无 Android 预编译库，故关闭 |
 | `COSYVOICE_NO_ICU` | ICU 无 Android 预编译库，故关闭 |
 

@@ -389,8 +389,12 @@ typedef struct cosyvoice_context_params
     uint32_t seed;
     cosyvoice_builtin_sampler_rng_policy_t builtin_sampler_rng_policy;
 
-    cosyvoice_sampler_t sampler;
-    void*               sampler_ctx;
+    union
+    {
+        cosyvoice_sampler_t     sampler;      ///< Plain custom sampler.
+        cosyvoice_sampler_ext_t sampler_ext;  ///< Worker-aware custom sampler (same slot).
+    };
+    void*                     sampler_ctx;
 } cosyvoice_context_params_t;
 ```
 
@@ -413,6 +417,7 @@ Groups context creation options that affect backend behavior, memory planning, a
 - `seed`: RNG seed for built-in sampler and noise generation.
 - `builtin_sampler_rng_policy`: Built-in sampler RNG evolution policy; ignored when `sampler` is non-null.
 - `sampler`: Optional custom sampler; set to `NULL` to use built-in sampler.
+- `sampler_ext`: Worker-aware custom sampler occupying the same storage as `sampler`. The runtime always invokes the callback through the extended signature (a trailing `worker_no` argument); a plain `cosyvoice_sampler_t` in this slot simply ignores the extra argument.
 - `sampler_ctx`: User pointer passed to `sampler`.
 
 ## cosyvoice_init_backend
@@ -531,6 +536,18 @@ typedef struct cosyvoice_context_params_v2
     cosyvoice_context_params_t base_params;
     uint32_t n_workers;
 } cosyvoice_context_params_v2_t;
+
+#ifdef __cplusplus
+// Flat C++ variant used by the C++ `cosyvoice_load_from_file_ext` template
+// overload. Layout-compatible with the C typedef above: the only difference
+// is that the struct's trailing alignment hole is materialized as an
+// explicit reserved field so the derived v3 struct keeps identical offsets.
+struct cosyvoice_context_params_v2_cpp : cosyvoice_context_params_t
+{
+    uint32_t n_workers;
+    uint32_t reserved_tail_padding;
+};
+#endif
 ```
 
 ### Description
@@ -541,6 +558,7 @@ Extends `cosyvoice_context_params_t` with a worker count for concurrent inferenc
 
 - `base_params`: Base context parameters.
 - `n_workers`: Number of worker slots to create.
+- `reserved_tail_padding` (C++ variant only): Reserved placeholder occupying the struct's trailing alignment padding — set it to `0`.
 
 ## cosyvoice_load_from_file_with_params_v2
 
@@ -628,13 +646,14 @@ struct cosyvoice_context_params_v3_cpp : cosyvoice_context_params_v2_cpp
     uint32_t dit_kv_fixed_slots;
     uint32_t dit_kv_offloadable_slots;
     uint32_t dit_kv_cache_length;
+    uint32_t reserved_tail_padding;
 };
 #endif
 ```
 
 ### Description
 
-Extends `cosyvoice_context_params_v2_t` with DiT (diffusion) KV cache configuration. The DiT module runs multiple diffusion steps during streaming TTS — each step computes self-attention over the full audio sequence. A KV cache can avoid redundant attention recomputation across steps, but the cache is very large (up to `sequence_length × n_diffusion_steps` key-value pairs).
+Extends `cosyvoice_context_params_v2_t` with DiT (diffusion) KV cache configuration. During streaming TTS every chunk runs the DiT's diffusion steps; without caching each step of each new chunk recomputes self-attention over the whole sequence emitted so far. The KV cache keeps the attention key/values of already-emitted positions **per diffusion step** (one cache slot per step), so a chunk only computes its fresh positions — but the cache is large (up to `sequence_length × n_diffusion_steps` key-value pairs in total).
 
 ### Fields
 

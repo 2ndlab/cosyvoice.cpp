@@ -138,7 +138,7 @@ COSYVOICE_API cosyvoice_context_t cosyvoice_load_from_file_ext(
     const cosyvoice_context_params_t* params,
     ggml_backend_t                    backend,
     uint32_t                          n_threads,
-    uint32_t                          reserved
+    uint32_t                          params_version
 );
 ```
 
@@ -149,10 +149,10 @@ Loads model context with explicit backend and threading parameters.
 ### Parameters
 
 - `filename`: Model path.
-- `params`: Context parameters.
+- `params`: Context parameters. When `params_version` selects an extended layout, pass a pointer to the embedded `base_params` member (it is the first member, so the struct address works too).
 - `backend`: Optional backend handle. If non-null, ownership is transferred to the created context.
 - `n_threads`: CPU thread count; set `0` to use hardware concurrency when available.
-- `reserved`: Reserved field. Pass `0`.
+- `params_version`: Context-parameters version. `COSYVOICE_CONTEXT_PARAMS_VERSION` (`0`) — `cosyvoice_context_params_t`; `COSYVOICE_CONTEXT_PARAMS_V2_VERSION` (`1`) — `cosyvoice_context_params_v2_t`; `COSYVOICE_CONTEXT_PARAMS_V3_VERSION` (`2`) — `cosyvoice_context_params_v3_t`.
 
 ### Returns
 
@@ -163,6 +163,7 @@ Context handle on success; `NULL` on failure.
 - This API is available in both shared and static GGML builds.
 - `backend == NULL` means auto-select backend.
 - If `backend != NULL`, ownership is transferred to the created context and released by `cosyvoice_free()`.
+- In C++, a template overload of this function (4 arguments, no `params_version`) deduces the version from the static type of `params` — it accepts `cosyvoice_context_params_t`, `..._v2_t`, `..._v3_t`, and the flat C++ variants `..._v2_cpp` / `..._v3_cpp`.
 
 ## cosyvoice_load_ext
 
@@ -190,7 +191,7 @@ Loads a model context from a memory buffer with explicit backend, threading, and
 - `params`: Context parameters.
 - `backend`: Optional backend handle. If non-null, ownership is transferred to the created context.
 - `n_threads`: CPU thread count; set `0` to use hardware concurrency when available.
-- `params_version`: Context parameters version. Pass `COSYVOICE_CONTEXT_PARAMS_V2_VERSION` to interpret `params` as `cosyvoice_context_params_v2_t`, or `0` for `cosyvoice_context_params_t`.
+- `params_version`: Context parameters version. `COSYVOICE_CONTEXT_PARAMS_VERSION` (`0`) for `cosyvoice_context_params_t`, `COSYVOICE_CONTEXT_PARAMS_V2_VERSION` (`1`) for `cosyvoice_context_params_v2_t`, `COSYVOICE_CONTEXT_PARAMS_V3_VERSION` (`2`) for `cosyvoice_context_params_v3_t` (pass the embedded base pointer).
 
 ### Returns
 

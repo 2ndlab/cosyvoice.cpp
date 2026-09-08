@@ -3,18 +3,12 @@
 #include "cosyvoice-audio.h"
 #include "fft.h"
 #include "common.h"
-
-#if defined(__x86_64__) || defined(_M_X64)
-#include <immintrin.h>
-#elif defined(__aarch64__) || defined(_M_ARM64)
-#define SIMDE_ENABLE_NATIVE_ALIASES
-#include <simde/x86/avx2.h>
-#include <simde/x86/fma.h>
-#else
-#error "src/cosyvoice-frontend.cpp requires x86_64 or ARM64 SIMD support"
-#endif
+#include "simd-kernels.h"
 
 #include <onnxruntime_cxx_api.h>
+
+#include <algorithm>
+#include <cmath>
 
 struct cosyvoice_frontend_context
 {
@@ -160,38 +154,10 @@ matrix cosyvoice_frontend_context::extract_speech_feat(float* speech, uint32_t l
     // Apply window
     matrix windowed_frames(signal.shape[0], signal.shape[1]);
     for (uint32_t i = 0; i != windowed_frames.shape[0]; ++i)
-    {
-        float* signal_cur = signal.data + i * signal.stride;
-        auto signal_end = signal_cur + windowed_frames.shape[1];
-        auto window_ptr = hann_window.data;
-        auto dest_ptr = windowed_frames.data + i * windowed_frames.stride;
-
-        while (signal_cur + 7 < signal_end)
-        {
-            __m256 a = _mm256_loadu_ps(signal_cur);
-            __m256 b = _mm256_loadu_ps(window_ptr);
-            _mm256_storeu_ps(dest_ptr, _mm256_mul_ps(a, b));
-            signal_cur += 8;
-            window_ptr += 8;
-            dest_ptr += 8;
-        }
-        while (signal_cur + 3 < signal_end)
-        {
-            __m128 a = _mm_loadu_ps(signal_cur);
-            __m128 b = _mm_loadu_ps(window_ptr);
-            _mm_storeu_ps(dest_ptr, _mm_mul_ps(a, b));
-            signal_cur += 4;
-            window_ptr += 4;
-            dest_ptr += 4;
-        }
-        while (signal_cur != signal_end)
-        {
-            *dest_ptr = *signal_cur * *window_ptr;
-            ++signal_cur;
-            ++window_ptr;
-            ++dest_ptr;
-        }
-    }
+        simd_dispatch<apply_window_kernel>(signal.data + i * signal.stride,
+            hann_window.data,
+            windowed_frames.data + i * windowed_frames.stride,
+            windowed_frames.shape[1]);
 
     matrix mel_spectrum(windowed_frames.shape[0], windowed_frames.shape[1]);
     for (size_t i = 0; i != windowed_frames.shape[0]; ++i)
@@ -205,64 +171,12 @@ matrix cosyvoice_frontend_context::extract_speech_feat(float* speech, uint32_t l
         auto mel_spectrum_cur_row = mel_spectrum.data + i * mel_spectrum.stride;
 
         for (uint32_t j = 0; j != mel.shape[1]; ++j)
-        {
-            auto mel_basis_cur_row = mel_basis.data + j * mel_basis.stride;
-            __m256 v = _mm256_setzero_ps();
-            uint32_t k = 0;
-            for (; k + 7 < basis_len; k += 8)
-            {
-                __m256 a = _mm256_loadu_ps(mel_spectrum_cur_row + k);
-                __m256 b = _mm256_loadu_ps(mel_basis_cur_row + k);
-                v = _mm256_fmadd_ps(a, b, v);
-            }
-            __m128 vlow = _mm256_castps256_ps128(v);
-            __m128 vhigh = _mm256_extractf128_ps(v, 1);
-            __m128 sum128 = _mm_add_ps(vlow, vhigh);
-
-            for (; k + 3 < basis_len; k += 4)
-            {
-                __m128 a = _mm_loadu_ps(mel_spectrum_cur_row + k);
-                __m128 b = _mm_loadu_ps(mel_basis_cur_row + k);
-                sum128 = _mm_fmadd_ps(a, b, sum128);
-            }
-
-            __m128 shuf = _mm_movehdup_ps(sum128);
-            __m128 sums = _mm_add_ps(sum128, shuf);
-            shuf = _mm_movehl_ps(shuf, sums);
-            sums = _mm_add_ss(sums, shuf);
-
-            float value = _mm_cvtss_f32(sums);
-            for (; k < basis_len; ++k)
-                value += mel_spectrum_cur_row[k] * mel_basis_cur_row[k];
-
-            mel(i, j) = value;
-        }
+            mel(i, j) = simd_dispatch<mel_dot_kernel>(mel_spectrum_cur_row,
+                mel_basis.data + j * mel_basis.stride,
+                basis_len);
     }
 
-    len = mel.shape[0] * mel.shape[1];
-    auto mel_cur = mel.data;
-    auto mel_end = mel_cur + len;
-#ifdef _MSC_VER
-    for (__m256 min_level = _mm256_set1_ps(1e-5f); mel_cur + 7 < mel_end; mel_cur += 8)
-    {
-        __m256 values = _mm256_loadu_ps(mel_cur);
-        values = _mm256_max_ps(values, min_level);
-        values = _mm256_log_ps(values);
-        _mm256_storeu_ps(mel_cur, values);
-    }
-    for (__m128 min_level = _mm_set_ps1(1e-5f); mel_cur + 7 < mel_end; mel_cur += 4)
-    {
-        __m128 values = _mm_loadu_ps(mel_cur);
-        values = _mm_max_ps(values, min_level);
-        values = _mm_log_ps(values);
-        _mm_storeu_ps(mel_cur, values);
-    }
-#endif
-    for (mel_end = mel.data + len; mel_cur != mel_end; ++mel_cur)
-    {
-        auto value = std::log(std::max(1e-5f, *mel_cur));
-        *mel_cur = value;
-    }
+    simd_dispatch<log_map_kernel>(mel.data, mel.shape[0] * mel.shape[1], 1e-5f);
 
     return mel;
 }
@@ -295,37 +209,10 @@ tokens_t cosyvoice_frontend_context::extract_speech_token(float* signal, uint32_
     // Apply window
     matrix mel_spectrum(padded_signal.shape[0], padded_signal.shape[1]);
     for (uint32_t i = 0; i != mel_spectrum.shape[0]; ++i)
-    {
-        float* signal_dataptr = padded_signal.data + i * padded_signal.stride;
-        auto signal_dataptr_end = signal_dataptr + mel_spectrum.shape[1];
-        auto window_ptr = hann_window2.data;
-        auto windowed_ptr = mel_spectrum.data + i * mel_spectrum.stride;
-        while (signal_dataptr + 7 < signal_dataptr_end)
-        {
-            __m256 a = _mm256_loadu_ps(signal_dataptr);
-            __m256 b = _mm256_loadu_ps(window_ptr);
-            _mm256_storeu_ps(windowed_ptr, _mm256_mul_ps(a, b));
-            signal_dataptr += 8;
-            window_ptr += 8;
-            windowed_ptr += 8;
-        }
-        while (signal_dataptr + 3 < signal_dataptr_end)
-        {
-            __m128 a = _mm_loadu_ps(signal_dataptr);
-            __m128 b = _mm_loadu_ps(window_ptr);
-            _mm_storeu_ps(windowed_ptr, _mm_mul_ps(a, b));
-            signal_dataptr += 4;
-            window_ptr += 4;
-            windowed_ptr += 4;
-        }
-        while (signal_dataptr != signal_dataptr_end)
-        {
-            *windowed_ptr = *signal_dataptr * *window_ptr;
-            ++signal_dataptr;
-            ++window_ptr;
-            ++windowed_ptr;
-        }
-    }
+        simd_dispatch<apply_window_kernel>(padded_signal.data + i * padded_signal.stride,
+            hann_window2.data,
+            mel_spectrum.data + i * mel_spectrum.stride,
+            mel_spectrum.shape[1]);
 
     for (uint32_t i = 0; i != mel_spectrum.shape[0]; ++i)
         fft(mel_spectrum.data + i * mel_spectrum.stride, mel_spectrum.data + i * mel_spectrum.stride, *fft_ctx2);
@@ -339,111 +226,14 @@ tokens_t cosyvoice_frontend_context::extract_speech_token(float* signal, uint32_
         auto mel_basis_dataptr = mel_basis2.data + i * mel_basis2.stride;
 
         for (uint32_t j = 0; j != mel.shape[1]; ++j)
-        {
-            auto mel_spectrum_dataptr = mel_spectrum.data + j * mel_spectrum.stride;
-            __m256 v = _mm256_setzero_ps();
-            uint32_t k = 0;
-            for (; k + 7 < basis_len; k += 8)
-            {
-                __m256 a = _mm256_loadu_ps(mel_spectrum_dataptr + k);
-                a = _mm256_mul_ps(a, a);
-                __m256 b = _mm256_loadu_ps(mel_basis_dataptr + k);
-                v = _mm256_fmadd_ps(a, b, v);
-            }
-            __m128 vlow = _mm256_castps256_ps128(v);
-            __m128 vhigh = _mm256_extractf128_ps(v, 1);
-            __m128 sum128 = _mm_add_ps(vlow, vhigh);
-
-            for (; k + 3 < basis_len; k += 4)
-            {
-                __m128 a = _mm_loadu_ps(mel_spectrum_dataptr + k);
-                a = _mm_mul_ps(a, a);
-                __m128 b = _mm_loadu_ps(mel_basis_dataptr + k);
-                sum128 = _mm_fmadd_ps(a, b, sum128);
-            }
-
-            __m128 shuf = _mm_movehdup_ps(sum128);
-            __m128 sums = _mm_add_ps(sum128, shuf);
-            shuf = _mm_movehl_ps(shuf, sums);
-            sums = _mm_add_ss(sums, shuf);
-
-            float value = _mm_cvtss_f32(sums);
-            for (; k != basis_len; ++k)
-                value += mel_spectrum_dataptr[k] * mel_spectrum_dataptr[k] * mel_basis_dataptr[k];
-
-            mel_dataptr[j] = value;
-        }
+            mel_dataptr[j] = simd_dispatch<mel_dot_sq_kernel>(mel_spectrum.data + j * mel_spectrum.stride,
+                mel_basis_dataptr,
+                basis_len);
     }
 
-    len = mel.shape[0] * mel.shape[1];
-    auto mel_dataptr = mel.data;
-    auto mel_dataptr_end = mel_dataptr + len;
-    float max_value = 1e-10f;
-
-#ifdef _MSC_VER
-    {
-        __m256 maximum_256 = _mm256_set1_ps(1e-10f);
-        for (__m256 min_level_vec = _mm256_set1_ps(1e-10f); mel_dataptr + 7 < mel_dataptr_end; mel_dataptr += 8)
-        {
-            __m256 values = _mm256_loadu_ps(mel_dataptr);
-            values = _mm256_max_ps(values, min_level_vec);
-            values = _mm256_log10_ps(values);
-            _mm256_storeu_ps(mel_dataptr, values);
-            maximum_256 = _mm256_max_ps(maximum_256, values);
-        }
-
-        __m128 maximum_128 = _mm_max_ps(_mm256_castps256_ps128(maximum_256), _mm256_extractf128_ps(maximum_256, 1));
-        for (__m128 min_level_vec = _mm_set_ps1(1e-10f); mel_dataptr + 3 < mel_dataptr_end; mel_dataptr += 4)
-        {
-            __m128 values = _mm_loadu_ps(mel_dataptr);
-            values = _mm_max_ps(values, min_level_vec);
-            values = _mm_log10_ps(values);
-            _mm_storeu_ps(mel_dataptr, values);
-            maximum_128 = _mm_max_ps(maximum_128, values);
-        }
-        alignas(16) float temp[4];
-        _mm_store_ps(temp, maximum_128);
-        max_value = std::max(temp[0], temp[1]);
-        max_value = std::max(max_value, temp[2]);
-        max_value = std::max(temp[3], max_value);
-    }
-#endif
-    for (; mel_dataptr != mel_dataptr_end; ++mel_dataptr)
-    {
-        auto value = std::log10(std::max(1e-10f, *mel_dataptr));
-        *mel_dataptr = value;
-        if (value > max_value)
-            max_value = value;
-    }
-
-    max_value -= 8.f;
-    __m256 maximum_256 = _mm256_set1_ps(max_value);
-    mel_dataptr = mel.data;
-    for (const __m256 _4 = _mm256_set1_ps(4.f); mel_dataptr + 7 < mel_dataptr_end; mel_dataptr += 8)
-    {
-        __m256 values = _mm256_loadu_ps(mel_dataptr);
-        values = _mm256_max_ps(values, maximum_256);
-        values = _mm256_add_ps(values, _4);
-        values = _mm256_div_ps(values, _4);
-        _mm256_storeu_ps(mel_dataptr, values);
-    }
-    for (const __m128 _4 = _mm_set_ps1(4.f), maximum_128 = _mm_set_ps1(max_value); mel_dataptr + 3 < mel_dataptr_end; mel_dataptr += 4)
-    {
-        __m128 values = _mm_loadu_ps(mel_dataptr);
-        values = _mm_max_ps(values, maximum_128);
-        values = _mm_add_ps(values, _4);
-        values = _mm_div_ps(values, _4);
-        _mm_storeu_ps(mel_dataptr, values);
-    }
-    for (mel_dataptr_end = mel.data + len; mel_dataptr != mel_dataptr_end; ++mel_dataptr)
-    {
-        auto value = *mel_dataptr;
-        if (max_value > value)
-            value = (max_value + 4.f) / 4.f;
-        else
-            value = (value + 4.f) / 4.f;
-        *mel_dataptr = value;
-    }
+    const size_t mel_len = mel.shape[0] * mel.shape[1];
+    const float max_value = simd_dispatch<log10_map_kernel>(mel.data, mel_len, 1e-10f);
+    simd_dispatch<spec_normalize_kernel>(mel.data, mel_len, max_value - 8.f);
 
     Ort::MemoryInfo memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
 
@@ -500,53 +290,8 @@ matrix cosyvoice_frontend_context::extract_spk_embedding(float* speech, uint32_t
     for (uint32_t i = 0; i != frames.shape[0]; ++i)
     {
         auto speech_frame = speech + i * win_shift;
-        __m256 sum256 = _mm256_setzero_ps();
-        uint32_t j = 0;
-        for (; j + 7 < win_size; j += 8)
-        {
-            __m256 v = _mm256_loadu_ps(speech_frame + j);
-            sum256 = _mm256_add_ps(sum256, v);
-        }
-
-        __m128 vlow = _mm256_castps256_ps128(sum256);
-        __m128 vhigh = _mm256_extractf128_ps(sum256, 1);
-        __m128 sum128 = _mm_add_ps(vlow, vhigh);
-
-        for (; j + 3 < win_size; j += 4)
-        {
-            __m128 v = _mm_loadu_ps(speech_frame + j);
-            sum128 = _mm_add_ps(sum128, v);
-        }
-
-        __m128 shuf = _mm_movehdup_ps(sum128);
-        __m128 sums = _mm_add_ps(sum128, shuf);
-        shuf = _mm_movehl_ps(shuf, sums);
-        sums = _mm_add_ss(sums, shuf);
-        float sum = _mm_cvtss_f32(sums);
-
-        for (; j != win_size; ++j)
-            sum += speech_frame[j];
-
-        float mean = sum / win_size;
-
-        __m256 vmean = _mm256_set1_ps(mean);
-        auto frame_dataptr = frames.data + i * frames.stride;
-        for (j = 0; j + 7 < win_size; j += 8)
-        {
-            __m256 v = _mm256_loadu_ps(speech_frame + j);
-            v = _mm256_sub_ps(v, vmean);
-            _mm256_storeu_ps(frame_dataptr + j, v);
-        }
-
-        for (; j + 3 < win_size; j += 4)
-        {
-            __m128 v = _mm_loadu_ps(speech_frame + j);
-            v = _mm_sub_ps(v, _mm256_castps256_ps128(vmean));
-            _mm_storeu_ps(frame_dataptr + j, v);
-        }
-
-        for (; j < win_size; ++j)
-            frame_dataptr[j] = speech_frame[j] - mean;
+        const float mean = simd_dispatch<sum_kernel>(speech_frame, win_size) / win_size;
+        simd_dispatch<sub_mean_kernel>(frames.data + i * frames.stride, speech_frame, win_size, mean);
     }
 
     matrix prev(frames.shape[0], frames.shape[1]);
@@ -556,30 +301,8 @@ matrix cosyvoice_frontend_context::extract_spk_embedding(float* speech, uint32_t
         memcpy(prev.data + i * prev.stride + 1, frames.data + i * frames.stride, (frames.shape[1] - 1) * sizeof(float));
     }
 
-    uint32_t numal = frames.shape[0] * frames.shape[1];
-    uint32_t i = 0;
-    for (__m256 preemph = _mm256_set1_ps(0.97f); i + 7 < numal; i += 8)
-    {
-        __m256 vframes = _mm256_loadu_ps(frames.data + i);
-        __m256 vprev = _mm256_loadu_ps(prev.data + i);
-        vframes = _mm256_sub_ps(vframes, _mm256_mul_ps(vprev, preemph));
-        __m256 window = _mm256_loadu_ps(povey_window.data + (i % win_size));
-        vframes = _mm256_mul_ps(vframes, window);
-        _mm256_storeu_ps(frames.data + i, vframes);
-    }
-
-    for (__m128 preemph = _mm_set_ps1(0.97f); i + 3 < numal; i += 4)
-    {
-        __m128 vframes = _mm_loadu_ps(frames.data + i);
-        __m128 vprev = _mm_loadu_ps(prev.data + i);
-        vframes = _mm_sub_ps(vframes, _mm_mul_ps(vprev, preemph));
-        __m128 window = _mm_loadu_ps(povey_window.data + (i % win_size));
-        vframes = _mm_mul_ps(vframes, window);
-        _mm_storeu_ps(frames.data + i, vframes);
-    }
-
-    for (; i < numal; ++i)
-        frames.data[i] = (frames.data[i] - 0.97f * prev.data[i]) * povey_window.data[i % win_size];
+    const size_t numal = frames.shape[0] * frames.shape[1];
+    simd_dispatch<preemph_gain_kernel>(frames.data, prev.data, povey_window.data, numal, win_size);
 
     matrix spectrum(frames.shape[0], padded_win_size / 2 + 1);
     auto buffer = std::make_unique<float[]>(padded_win_size);
@@ -590,21 +313,9 @@ matrix cosyvoice_frontend_context::extract_spk_embedding(float* speech, uint32_t
     {
         memcpy(fft_input.get(), frames.data + i * frames.stride, win_size * sizeof(float));
         fft(fft_input.get(), buffer.get(), *fft_ctx_spk);
-        uint32_t j = 0;
-        for (; j + 7 < padded_win_size / 2 + 1; j += 8)
-        {
-            __m256 v = _mm256_loadu_ps(buffer.get() + j);
-            v = _mm256_mul_ps(v, v);
-            _mm256_storeu_ps(spectrum.data + i * spectrum.stride + j, v);
-        }
-        for (; j + 3 < padded_win_size / 2 + 1; j += 4)
-        {
-            __m128 v = _mm_loadu_ps(buffer.get() + j);
-            v = _mm_mul_ps(v, v);
-            _mm_storeu_ps(spectrum.data + i * spectrum.stride + j, v);
-        }
-        for (; j != padded_win_size / 2 + 1; ++j)
-            spectrum(i, j) = buffer[j] * buffer[j];
+        simd_dispatch<square_store_kernel>(buffer.get(),
+            spectrum.data + i * spectrum.stride,
+            padded_win_size / 2 + 1);
     }
 
     matrix feat(spectrum.shape[0], mel_basis_spk.shape[0]);
@@ -614,113 +325,13 @@ matrix cosyvoice_frontend_context::extract_spk_embedding(float* speech, uint32_t
         for (uint32_t j = 0; j != feat.shape[0]; ++j)
         {
             auto spectrum_dataptr = spectrum.data + j * spectrum.stride;
-            __m256 sum256 = _mm256_setzero_ps();
-            uint32_t k = 0;
-            for (; k + 7 < spectrum.shape[1]; k += 8)
-            {
-                __m256 a = _mm256_loadu_ps(spectrum_dataptr + k);
-                __m256 b = _mm256_loadu_ps(mel_basis_spk_dataptr + k);
-                sum256 = _mm256_fmadd_ps(a, b, sum256);
-            }
-            __m128 vlow = _mm256_castps256_ps128(sum256);
-            __m128 vhigh = _mm256_extractf128_ps(sum256, 1);
-            __m128 sum128 = _mm_add_ps(vlow, vhigh);
-
-            for (; k + 3 < spectrum.shape[1]; k += 4)
-            {
-                __m128 a = _mm_loadu_ps(spectrum_dataptr + k);
-                __m128 b = _mm_loadu_ps(mel_basis_spk_dataptr + k);
-                sum128 = _mm_fmadd_ps(a, b, sum128);
-            }
-
-            __m128 shuf = _mm_movehdup_ps(sum128);
-            __m128 sums = _mm_add_ps(sum128, shuf);
-            shuf = _mm_movehl_ps(shuf, sums);
-            sums = _mm_add_ss(sums, shuf);
-
-            float sum = _mm_cvtss_f32(sums);
-            for (; k != spectrum.shape[1]; ++k)
-                sum += spectrum_dataptr[k] * mel_basis_spk_dataptr[k];
+            const float sum = simd_dispatch<mel_dot_kernel>(spectrum_dataptr, mel_basis_spk_dataptr, spectrum.shape[1]);
             feat(j, i) = std::log(std::max(1e-10f, sum));
         }
     }
 
     for (uint32_t i = 0; i != feat.shape[1]; ++i)
-    {
-        uint32_t j = 0;
-        __m256 sum256 = _mm256_setzero_ps();
-        __m256i idx256 = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
-        __m256i stride256 = _mm256_set1_epi32(static_cast<int>(feat.stride));
-        __m256i _8stridev = _mm256_set1_epi32(static_cast<int>(8 * feat.stride));
-        idx256 = _mm256_mullo_epi32(idx256, stride256);
-        auto feat_start = feat.data + i;
-        for (; j + 7 < feat.shape[0]; j += 8)
-        {
-            __m256 v = _mm256_i32gather_ps(feat_start, idx256, 4);
-            sum256 = _mm256_add_ps(sum256, v);
-            idx256 = _mm256_add_epi32(idx256, _8stridev);
-        }
-
-        __m128 vlow = _mm256_castps256_ps128(sum256);
-        __m128 vhigh = _mm256_extractf128_ps(sum256, 1);
-        __m128 sum128 = _mm_add_ps(vlow, vhigh);
-
-        __m128i stride128 = _mm_set1_epi32(static_cast<int>(feat.stride));
-        __m128i _4stridev = _mm_set1_epi32(static_cast<int>(4 * feat.stride));
-        __m128i idx128 = _mm_setr_epi32(j, j + 1, j + 2, j + 3);
-        idx128 = _mm_mullo_epi32(idx128, stride128);
-        for (; j + 3 < feat.shape[0]; j += 4)
-        {
-            __m128 v = _mm_i32gather_ps(feat_start, idx128, 4);
-            sum128 = _mm_add_ps(sum128, v);
-            idx128 = _mm_add_epi32(idx128, _4stridev);
-        }
-
-        __m128 shuf = _mm_movehdup_ps(sum128);
-        __m128 sums = _mm_add_ps(sum128, shuf);
-        shuf = _mm_movehl_ps(shuf, sums);
-        sums = _mm_add_ss(sums, shuf);
-        float sum = _mm_cvtss_f32(sums);
-
-        while (j != feat.shape[0])
-            sum += feat(j++, i);
-
-        float mean = sum / feat.shape[0];
-
-        __m256 mean256 = _mm256_set1_ps(mean);
-        idx256 = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
-        idx256 = _mm256_mullo_epi32(idx256, stride256);
-        for (j = 0; j + 7 < feat.shape[0]; j += 8)
-        {
-            __m256 v = _mm256_i32gather_ps(feat_start, idx256, 4);
-            v = _mm256_sub_ps(v, mean256);
-            alignas(32) float values[8];
-            _mm256_store_ps(values, v);
-
-            auto mem = feat_start + j * feat.stride;
-            for (int k = 0, l = 8; k != l; ++k)
-                mem[k * feat.stride] = values[k];
-            idx256 = _mm256_add_epi32(idx256, _8stridev);
-        }
-
-        __m128 mean128 = _mm_set_ps1(mean);
-        idx128 = _mm_setr_epi32(j, j + 1, j + 2, j + 3);
-        idx128 = _mm_mullo_epi32(idx128, stride128);
-        for (; j + 3 < feat.shape[0]; j += 4)
-        {
-            __m128 v = _mm_i32gather_ps(feat_start, idx128, 4);
-            v = _mm_sub_ps(v, mean128);
-            alignas(16) float values[4];
-            _mm_store_ps(values, v);
-            auto mem = feat_start + j * feat.stride;
-            for (int k = 0, l = 4; k != l; ++k)
-                mem[k * feat.stride] = values[k];
-            idx128 = _mm_add_epi32(idx128, _4stridev);
-        }
-
-        while (j != feat.shape[0])
-            feat(j++, i) -= mean;
-    }
+        simd_dispatch<column_mean_sub_kernel>(feat.data + i, feat.shape[0], feat.stride);
 
     auto input_names = campplus_session.GetInputNames();
     auto output_names = campplus_session.GetOutputNames();

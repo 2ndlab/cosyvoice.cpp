@@ -1,8 +1,8 @@
 diff --git a/src/ggml-metal/ggml-metal-device.m b/src/ggml-metal/ggml-metal-device.m
-index 80e47f2..90ecd08 100644
+index e20a4e8..3f4fc12 100644
 --- a/src/ggml-metal/ggml-metal-device.m
 +++ b/src/ggml-metal/ggml-metal-device.m
-@@ -1209,13 +1209,9 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
+@@ -1682,13 +1682,9 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
          case GGML_OP_POOL_2D:
              return op->src[0]->type == GGML_TYPE_F32;
          case GGML_OP_PAD:
@@ -18,12 +18,12 @@ index 80e47f2..90ecd08 100644
 +            return ggml_get_op_params_i32(op, 8) == 0;
          case GGML_OP_PAD_REFLECT_1D:
          case GGML_OP_TIMESTEP_EMBEDDING:
-         case GGML_OP_LEAKY_RELU:
+             return op->src[0]->type == GGML_TYPE_F32;
 diff --git a/src/ggml-metal/ggml-metal-impl.h b/src/ggml-metal/ggml-metal-impl.h
-index 330278d..c7a28c7 100644
+index 30e40f5..bbc7800 100644
 --- a/src/ggml-metal/ggml-metal-impl.h
 +++ b/src/ggml-metal/ggml-metal-impl.h
-@@ -1053,6 +1053,10 @@ typedef struct {
+@@ -1098,6 +1098,10 @@ typedef struct {
      uint64_t nb1;
      uint64_t nb2;
      uint64_t nb3;
@@ -35,10 +35,10 @@ index 330278d..c7a28c7 100644
  
  typedef struct {
 diff --git a/src/ggml-metal/ggml-metal-ops.cpp b/src/ggml-metal/ggml-metal-ops.cpp
-index c716f11..123d80b 100644
+index 3db8bca..5577d4b 100644
 --- a/src/ggml-metal/ggml-metal-ops.cpp
 +++ b/src/ggml-metal/ggml-metal-ops.cpp
-@@ -4284,7 +4284,11 @@ int ggml_metal_op_pad(ggml_metal_op_t ctx, int idx) {
+@@ -4961,7 +4961,11 @@ int ggml_metal_op_pad(ggml_metal_op_t ctx, int idx) {
          /*.nb0  =*/ nb0,
          /*.nb1  =*/ nb1,
          /*.nb2  =*/ nb2,
@@ -51,11 +51,11 @@ index c716f11..123d80b 100644
      };
  
      auto pipeline = ggml_metal_library_get_pipeline_pad(lib, op);
-diff --git a/src/ggml-metal/ggml-metal.metal b/src/ggml-metal/ggml-metal.metal
-index 969fddf..5661f95 100644
---- a/src/ggml-metal/ggml-metal.metal
-+++ b/src/ggml-metal/ggml-metal.metal
-@@ -5842,9 +5842,14 @@ kernel void kernel_pad_impl(
+diff --git a/src/ggml-metal/kernels/misc.metal b/src/ggml-metal/kernels/misc.metal
+index 11104b4..a57ae25 100644
+--- a/src/ggml-metal/kernels/misc.metal
++++ b/src/ggml-metal/kernels/misc.metal
+@@ -127,9 +127,14 @@ kernel void kernel_pad_impl(
      const int32_t k0 = tgpig.x/args.ne1;
      const int32_t i1 = tgpig.x - k0*args.ne1;
  
@@ -73,12 +73,14 @@ index 969fddf..5661f95 100644
  
      device const T * src0_ptr = (device const T *) (src0 + i03*args.nb03 + i02*args.nb02 + i01*args.nb01);
      device       T * dst_ptr  = (device       T *) (dst  +  i3*args.nb3  +  i2*args.nb2  +  i1*args.nb1);
-@@ -5855,8 +5860,9 @@ kernel void kernel_pad_impl(
+@@ -140,8 +145,11 @@ kernel void kernel_pad_impl(
              break;
          }
  
 -        if (i0 < args.ne00 && i1 < args.ne01 && i2 < args.ne02 && i3 < args.ne03) {
 -            dst_ptr[i0] = src0_ptr[i0];
++        // Note: if the f32_4 (C4) path is ever re-enabled upstream, p0_beg must be
++        // divided by 4 here, since i0/ne00 count elements in units of T.
 +        const int32_t i00 = i0 - args.p0_beg;
 +        if (row_in_src && i00 >= 0 && i00 < args.ne00) {
 +            dst_ptr[i0] = src0_ptr[i00];

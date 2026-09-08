@@ -28,6 +28,7 @@ This project provides:
 - [Inference Pipeline](#inference-pipeline)
 - [Tooling Guide](#tooling-guide)
 - [Build](#build)
+- [SIMD Acceleration](#simd-acceleration)
 - [Streaming TTS & DiT KV Cache](#streaming-tts--dit-kv-cache)
 - [Model Conversion to GGUF](#model-conversion-to-gguf)
 - [Backend Test Status](#backend-test-status)
@@ -49,7 +50,7 @@ This project provides:
 | **Inference Interruption** | Press `Ctrl+C` in CLI or disconnect from the server to stop generation as soon as possible — output up to that point remains valid |
 | **Model Quantization** | Quantize GGUF models to smaller formats (Q2_K through F16) with the built-in `quantize` tool |
 | **Streaming TTS** | Real-time speech generation with low-latency audio delivery via callback — delivers audio chunks as they are synthesized, before the full utterance completes |
-| **DiT KV Cache** | Avoid redundant attention recomputation across diffusion steps during streaming — configurable with fixed (device), offloadable (CPU), and uncached slot categories to trade memory vs. speed |
+| **DiT KV Cache** | Reuses attention key/values of already-emitted positions per diffusion step during streaming, so each new chunk computes only its fresh positions — configurable fixed (device), offloadable (CPU), and uncached slot categories to trade memory vs. speed |
 | **Flash Attention** | LLM and Flow flash attention support (`--llm-flash-attn`, `--flow-flash-attn`) for reduced memory and faster inference when the backend supports it |
 | **Chunk Tokens Control** | Tune streaming latency vs. overhead tradeoff via `--chunk-tokens` — smaller chunks reduce first-chunk latency, larger chunks reduce RTF |
 | **KV Cache Quantization** | Reduce LLM memory usage via `--llm-kv-cache-type` (f32 / f16 / q8_0 / q5_1 / q4_0 / ...). Supports asymmetric quantization with separate K/V types (e.g. `k=q8_0,v=q4_0`). |
@@ -59,6 +60,7 @@ This project provides:
 | **Inference Buffer Policies** | `shared` / `balanced` / `dedicated` buffer modes to trade off memory vs. throughput |
 | **Text Splitting & Fade-in** | Smart text splitting for long inputs and configurable output fade-in postprocessing |
 | **Multiple Backends** | CPU, CUDA, Metal, Vulkan, SYCL (see [Backend Test Status](#backend-test-status)) |
+| **Adaptive SIMD Dispatch** | CPU DSP hot paths (FFT, mel/spectral kernels, log/sincos) are compiled into per-ISA tiers — scalar, SSE4.2, AVX, AVX2 (+FMA3), AVX-512, AVX10.1 — and runtime CPUID detection selects the fastest tier the CPU supports; ARM64 optionally emulates the SSE4.2+FMA3 class on NEON via SIMDe. One binary runs everywhere (see [SIMD Acceleration](#simd-acceleration)) |
 | **Cross-Platform** | Windows (x64), Linux (x86_64), macOS (arm64) — all tested in CI |
 
 ## Quick Start
@@ -208,7 +210,7 @@ Refer to the [GGML documentation](https://github.com/ggml-org/llama.cpp/blob/mas
 The Metal PAD beg-padding patch in `cmake/patches/ggml-metal-pad-beg.patch` is written against a specific ggml snapshot. If ggml is allowed to float to the latest master while Metal is enabled, line drift / kernel rewrites regularly break `git apply`, silently disabling Metal PAD support. To keep the patch valid, the build system pins the ggml commit — but only for Metal builds, so other backends keep using the latest ggml as before.
 
 - `GGML_METAL` defaults to **ON on Apple Silicon** (see ggml's own CMakeLists) and can be forced with `-DGGML_METAL=ON/OFF`.
-- **Metal builds** (default on Apple Silicon): GGML is pinned to commit `af97976c7810cdabb1863172f31c432dab767de7` (configurable via `GGML_PINNED_COMMIT` in `cmake/Dependencies.cmake`). CMake checks out that commit after cloning, warns (without failing) if an existing `vendor/ggml` checkout has drifted, and applies `cmake/patches/ggml-metal-pad-beg.patch` idempotently (skipped if already applied).
+- **Metal builds** (default on Apple Silicon): GGML is pinned to commit `e91ded11bdcd78c42f9c8d3978ff6686eb4c1226` (v0.23.0; configurable via `GGML_PINNED_COMMIT` in `cmake/Dependencies.cmake`). CMake checks out that commit after cloning, warns (without failing) if an existing `vendor/ggml` checkout has drifted, and applies `cmake/patches/ggml-metal-pad-beg.patch` idempotently (skipped if already applied).
 - **Non-Metal builds**: unchanged behavior — the latest ggml master is shallow-cloned (`--depth=1`) and no patch is applied.
 
 ```bash
@@ -227,6 +229,15 @@ To upgrade ggml for Metal builds, bump `GGML_PINNED_COMMIT` in `cmake/Dependenci
 | `ORT_PREBUILT_DIR=<path>` | Path to ONNX Runtime prebuilt binaries (default: `<build_dir>/_deps/onnxruntime`) |
 | `FFMPEG_PREBUILT_DIR=<path>` | Path to FFmpeg prebuilt binaries |
 | `SIMDE_INCLUDE_DIR=<path>` | SIMDe headers for ARM64/aarch64 (including Android cross-compilation) — see [SIMDe (SIMD Everywhere)](#simde-simd-everywhere) |
+
+**Link-time optimization (LTO)**
+
+Enabled by default (`CMAKE_INTERPROCEDURAL_OPTIMIZATION=TRUE`). Reduces binary size ~3% by deduplicating identical SIMD tier bodies and inlining small cross-TU helpers. Verified safe on MSVC, GCC, and Clang — per-object `/arch` flags are preserved through LTO codegen.
+
+```bash
+# Disable if faster iteration is needed
+cmake -B build -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF
+```
 
 ### Build Matrix
 
@@ -287,12 +298,12 @@ Expected markers/layout:
 
 ### SIMDe (SIMD Everywhere)
 
-Hot CPU paths use x86 AVX2/FMA intrinsics directly. [SIMDe](https://github.com/simd-everywhere/simde) is a header-only library that maps these x86 intrinsics to other ISAs — on ARM64/aarch64 the same code compiles to NEON without modification.
+The SIMD tiers described in [SIMD Acceleration](#simd-acceleration) are written against x86 intrinsics. [SIMDe](https://github.com/simd-everywhere/simde) is a header-only library that maps these x86 intrinsics to other ISAs — on ARM64/aarch64 the emulated SSE4.2+FMA3 class compiles to NEON without modification.
 
 How CMake handles it (`CMakeLists.txt`):
 
-- **x86_64 (GCC/Clang)**: the SIMD paths are compiled with `-mavx -mavx2 -mfma` and run natively.
-- **ARM64/aarch64 (incl. Android cross-compilation)**: SIMDe is **required**. CMake looks for `simde/x86/avx2.h` in `/opt/homebrew/include`, `/usr/local/include`, `/usr/include` and `vendor/simde/`, and configuration fails with a clear error if it is not found.
+- **x86_64**: SIMDe is never needed — every tier runs natively on its own ISA.
+- **ARM64/aarch64 (incl. Android cross-compilation)**: SIMDe is **optional**. If CMake finds `simde/x86/sse4.2.h` (in `/opt/homebrew/include`, `/usr/local/include`, `/usr/include`, `vendor/simde/` or via `-DSIMDE_INCLUDE_DIR=<path>`) the SSE4.2+FMA3 class is emulated via NEON; the scalar tier is not even built then, because dispatch on non-x86 always selects the emulated class. Without SIMDe the build automatically falls back to scalar-only kernels.
 
 Getting SIMDe:
 
@@ -308,7 +319,7 @@ git clone --depth=1 https://github.com/simd-everywhere/simde.git
 cmake -B build -DSIMDE_INCLUDE_DIR=/path/to/simde
 ```
 
-x86_64 builds do not need SIMDe. For Android specifics, see [docs/build-android.md](docs/build-android.md).
+For Android specifics, see [docs/build-android.md](docs/build-android.md).
 
 ### Audio Backend & FFmpeg
 
@@ -341,15 +352,24 @@ License reminder:
 
 - The repository code is MIT. FFmpeg prebuilt binaries may be LGPL or GPL depending on build options. Using a GPL-enabled FFmpeg build may impose GPL obligations on your redistributed binaries. See [FFmpeg-NOTICE.md](FFmpeg-NOTICE.md).
 
+## SIMD Acceleration
+
+The CPU DSP path — FFT, mel/spectral kernels, log/sincos math — is hand-written with intrinsics, compiled into **per-ISA tiers**, and selected at **runtime** by CPUID detection. One binary therefore runs the fastest tier the machine supports, from SSE4.2-era CPUs up to AVX10 parts, with no separate downloads and no risk of illegal instructions on older hardware.
+
+- Tiers: **scalar**, **SSE4.2 (+FMA3)**, **AVX**, **AVX2**, **AVX-512** (needs F+BW+DQ+VL and OS-enabled state), and **AVX10.1** — Panther Lake / Nova Lake and later are detected via CPUID leaf 0x24H; their 512-bit mode reuses the AVX-512 tier, only the 256-bit class has its own. Nothing to configure: a CPU that enumerates AVX10 gets it automatically.
+- On ARM64 (including Android) the SSE4.2+FMA3 tier can be emulated on NEON via [SIMDe](#simde-simd-everywhere); without SIMDe the build falls back to scalar-only.
+
+Build-time control (defaults: all tiers ON): `-DCOSYVOICE_NO_SIMD=OFF/ON` kills all SIMD; `-DCOSYVOICE_HAS_SCALAR`, `_SSE42`, `_AVX`, `_AVX2`, `_AVX512`, `_AVX10_1` drop individual tiers (disabling SSE4.2 cascades the higher legacy tiers off; the AVX10-256 tier needs a toolchain that knows its flags and is silently skipped otherwise). Debug builds print the detected capability set at startup. Tier layout, dispatch rules, and the AVX10 policy in depth: [docs/SIMD.md](docs/SIMD.md).
+
 ## Streaming TTS & DiT KV Cache
 
 Streaming TTS delivers audio chunks incrementally via a callback function as they are synthesized, without waiting for the full utterance to complete. This enables real-time playback and lower perceived latency.
 
-The streaming pipeline introduces a **DiT KV cache** to avoid redundant computation. During non-streaming inference, the DiT module runs 10 diffusion steps, each computing self-attention over the full audio sequence — resulting in 10× attention recomputation. The KV cache stores intermediate key/value tensors across steps so that each position is computed only once.
+Each chunk runs the DiT's 10 diffusion steps — without caching, every step of every new chunk recomputes attention over the whole sequence emitted so far. The **DiT KV cache** keeps the attention key/values of already-emitted positions **per diffusion step** (each step has its own cache slot), so a new chunk only computes its fresh positions: every cached position is processed once per step, then reused by all later chunks.
 
 ### Slot Organization
 
-The DiT KV cache is organized into **slots**, where each slot holds the KV cache for one diffusion step. With the default 10 steps, there can be at most 10 slots.
+The DiT KV cache is organized into **slots**, where each slot holds the KV cache for one diffusion step. With the (fixed) 10 diffusion steps, at most 10 slots exist.
 
 Slots fall into three categories:
 
@@ -359,11 +379,7 @@ Slots fall into three categories:
 | **Offloadable** | Offloaded to CPU when not in use | Saves device memory at the cost of transfer latency |
 | **Uncached** | Not stored at all | Full attention recomputation every step, no extra memory |
 
-**Step-to-slot mapping.** The diffusion steps are laid out in order: uncached steps first, then offloadable steps, then fixed steps. Each **fixed** step gets its own dedicated device slot. All **offloadable** steps share a single scratch slot (device slot 0): a step computes into it, immediately copies the KV to its own CPU buffer, and the next step copies it back — so offloading needs only one device slot, plus one CPU buffer per offloadable step.
-
-**Automatic normalization.** A single offloadable slot (`fixed=0, offloadable=1`) is converted to a fixed slot (`fixed=1, offloadable=0`): one CPU round-trip per chunk plus a scratch slot is strictly more expensive than just keeping it resident. Both counts are also clamped so `fixed + offloadable` never exceeds the 10 diffusion steps.
-
-Total cached steps = `fixed + offloadable`. Remaining steps (10 − total) use full recomputation.
+**Step-to-slot mapping.** Steps are laid out in order — uncached first, then offloadable (all sharing one device scratch slot, each with its own CPU buffer), then fixed (one dedicated device slot each). A configuration with exactly one offloadable slot is normalized to fixed (`offloadable=1 → fixed+1`), and both counts are clamped so `fixed + offloadable` never exceeds the 10 diffusion steps. Total cached steps = `fixed + offloadable`; the rest recompute fully. Internal slot/scheduling layout: [docs/API_cosyvoice.md — DiT KV Cache Concept](docs/API_cosyvoice.md#dit-kv-cache-concept).
 
 The cache is large, so the default is 0 slots (all 10 steps fully recomputed). When enabled and the sequence exceeds the configured cache length, some positions are discarded — inference continues normally but output quality may degrade. Offloadable slots transfer data between device and CPU, which may not improve speed and can be slower than full recomputation depending on bandwidth.
 
@@ -371,12 +387,12 @@ The cache is large, so the default is 0 slots (all 10 steps fully recomputed). W
 
 ### Configuration
 
-DiT KV cache parameters are configured via CLI/server `--dit-kv-*` flags:
+DiT KV cache parameters are configured via CLI/server `--dit-kv-*` flags (context parameters — on the CLI they apply to interactive/streaming mode):
 
-- `--dit-kv-cache-type`: Storage format (f32/f16/q8_0/...) for the DiT KV cache.
-- `--dit-kv-fixed-slots`: Number of device-resident slots.
-- `--dit-kv-offloadable-slots`: Number of CPU-offloadable slots.
-- `--dit-kv-cache-length`: Maximum sequence positions kept in the cache.
+- `--dit-kv-cache-type`: Storage format for the cache — `f32`/`f16`/`q8_0`/`q5_1`/`q5_0`/`q4_1`/`q4_0`, or asymmetric with separate K and V formats (`k=<type>,v=<type>[,fallback=<type>]`, same style as `--llm-kv-cache-type`).
+- `--dit-kv-fixed-slots`: Number of device-resident slots. Default: `0`.
+- `--dit-kv-offloadable-slots`: Number of CPU-offloadable slots. Default: `0`.
+- `--dit-kv-cache-length`: Maximum sequence positions kept in the cache. Default: `0` = max LLM length × 10.
 
 Suggested starting points (10 diffusion steps total):
 
@@ -464,6 +480,7 @@ Current backend test results are as follows:
 ## Documentation
 - API index: [docs/API.md](docs/API.md)
 - Tooling guide: [docs/TOOLS.md](docs/TOOLS.md)
+- SIMD tier architecture (developer reference): [docs/SIMD.md](docs/SIMD.md)
 - Android build guide: [docs/build-android.md](docs/build-android.md)
 
 ## AI Usage Disclosure
@@ -473,8 +490,9 @@ Current backend test results are as follows:
 
 ## Third-Party Notices
 - See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for bundled dependency license details.
+- Core tensor compute library: **GGML** (MIT, vendored/auto-cloned) — the foundation split out of llama.cpp; a small Metal patch is applied at build time.
+- **llama.cpp** (MIT): tokenizer implementation adapted from it; **ONNX Runtime** (MIT), **ICU** (Unicode license), and **SIMDe** (MIT, optional) power the frontend and SIMD emulation.
 - FFT implementation references/adapts KissFFT (BSD-3-Clause) with project-specific SIMD optimizations; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-- Tokenizer implementation is adapted from llama.cpp (MIT).
 
 ## Licensing
 - **Repository code**: MIT (`LICENSE`).

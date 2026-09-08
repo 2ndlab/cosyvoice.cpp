@@ -28,6 +28,7 @@
 - [推理流程](#推理流程)
 - [工具使用说明](#工具使用说明)
 - [构建](#构建)
+- [SIMD 加速](#simd-加速)
 - [流式 TTS 与 DiT KV 缓存](#流式-tts-与-dit-kv-缓存)
 - [模型转 GGUF](#模型转-gguf)
 - [后端测试情况](#后端测试情况)
@@ -49,7 +50,7 @@
 | **推理中断** | CLI 中按 `Ctrl+C` 或断开 server 连接时尽快停止生成——截止点之前的输出仍然有效 |
 | **模型量化** | 内置 `quantize` 工具，支持 Q2_K 到 F16 多种量化格式 |
 | **流式 TTS** | 实时语音生成，通过回调逐段交付音频——在完整语句尚未合成完毕前即可开始播放 |
-| **DiT KV 缓存** | 在流式推理过程中，跨扩散步复用注意力 KV 缓存，避免冗余计算——可配置固定（设备内存）、可卸载（CPU）、不缓存三种槽位类型 |
+| **DiT KV 缓存** | 流式分块合成时，按扩散步缓存已产出位置的注意力 KV，新块只计算新增位置——可配置固定（设备内存）、可卸载（CPU）、不缓存三种槽位类型 |
 | **Flash Attention** | LLM 与 Flow 模块均支持 flash attention（`--llm-flash-attn`、`--flow-flash-attn`），后端支持时可降低显存并加速推理 |
 | **分块 Token 控制** | 通过 `--chunk-tokens` 调节流式推理的延迟与开销平衡——较小分块降低首块延迟，较大分块降低 RTF |
 | **KV Cache 量化** | 通过 `--llm-kv-cache-type` 降低 LLM 内存占用（f32 / f16 / q8_0 / q5_1 / q4_0 / ...）。支持非对称量化，K 和 V 可独立指定类型（如 `k=q8_0,v=q4_0`）。 |
@@ -59,6 +60,7 @@
 | **推理 Buffer 策略** | `shared` / `balanced` / `dedicated` 三种模式，权衡内存与吞吐 |
 | **文本拆分与淡入** | 长文本智能拆分与可配置的输出淡入后处理 |
 | **多后端支持** | CPU、CUDA、Metal、Vulkan、SYCL（见[后端测试情况](#后端测试情况)） |
+| **自适应 SIMD 分派** | CPU DSP 热点（FFT、mel/频谱 kernel、log/sincos）按指令集分层编译——标量、SSE4.2、AVX、AVX2（+FMA3）、AVX-512、AVX10.1——运行时经 CPUID 探测自动选择 CPU 支持的最快层级；ARM64 可选通过 SIMDe 在 NEON 上模拟 SSE4.2+FMA3。单一二进制全平台通用（见 [SIMD 加速](#simd-加速)） |
 | **跨平台** | Windows (x64)、Linux (x86_64)、macOS (arm64) — 均在 CI 中测试 |
 
 ## 快速开始
@@ -208,7 +210,7 @@ cmake -B build -DGGML_VULKAN=ON
 `cmake/patches/ggml-metal-pad-beg.patch`（Metal PAD beg-padding 补丁）是针对特定 ggml 快照编写的。若 Metal 开启而 ggml 漂移到最新 master，`git apply` 会因行偏移/内核重写而失败，从而静默禁用 Metal PAD 支持。为保证补丁始终有效，构建系统会对 ggml 固定提交号——但仅在 Metal 构建时生效，其他后端仍像以前一样使用最新 ggml。
 
 - `GGML_METAL` 在 Apple Silicon 上**默认为 ON**（见 ggml 自身 CMakeLists），也可用 `-DGGML_METAL=ON/OFF` 强制指定。
-- **Metal 构建**（Apple Silicon 默认）：GGML 被固定到提交 `af97976c7810cdabb1863172f31c432dab767de7`（可通过 `cmake/Dependencies.cmake` 中的 `GGML_PINNED_COMMIT` 配置）。CMake 会在克隆后自动 checkout 该提交；若已有 `vendor/ggml` 检出偏离固定提交，仅警告而不中断；并幂等应用 `cmake/patches/ggml-metal-pad-beg.patch`（已应用则跳过）。
+- **Metal 构建**（Apple Silicon 默认）：GGML 被固定到提交 `e91ded11bdcd78c42f9c8d3978ff6686eb4c1226`（v0.23.0，可通过 `cmake/Dependencies.cmake` 中的 `GGML_PINNED_COMMIT` 配置）。CMake 会在克隆后自动 checkout 该提交；若已有 `vendor/ggml` 检出偏离固定提交，仅警告而不中断；并幂等应用 `cmake/patches/ggml-metal-pad-beg.patch`（已应用则跳过）。
 - **非 Metal 构建**：行为不变——浅克隆（`--depth=1`）最新 master，不应用任何补丁。
 
 ```bash
@@ -226,7 +228,16 @@ cmake -B build -DGGML_METAL=ON
 | `ICU_PREBUILT_DIR=<path>` | ICU 预编译二进制路径（默认 `<build_dir>/_deps/icu`） |
 | `ORT_PREBUILT_DIR=<path>` | ONNX Runtime 预编译二进制路径（默认 `<build_dir>/_deps/onnxruntime`） |
 | `FFMPEG_PREBUILT_DIR=<path>` | FFmpeg 预编译二进制路径 |
-| `SIMDE_INCLUDE_DIR=<path>` | ARM64/aarch64（含 Android 交叉编译）所需的 SIMDe 头文件目录——见 [SIMDe（SIMD Everywhere）](#simdesimd-everywhere) |
+| `SIMDE_INCLUDE_DIR=<path>` | ARM64/aarch64（含 Android 交叉编译）的 SIMDe 头文件目录（可选，未提供时自动降级为纯标量）——见 [SIMDe（SIMD Everywhere）](#simdesimd-everywhere) |
+
+**链接时优化（LTO）**
+
+默认启用（`CMAKE_INTERPROCEDURAL_OPTIMIZATION=TRUE`）。通过折叠完全相同的 SIMD tier 函数体和内联跨 TU 小函数，减少约 3% 二进制体积。已在 MSVC、GCC、Clang 上验证安全——各编译单元的 `/arch` 标记在 LTO codegen 中保持隔离。
+
+```bash
+# 需要更快迭代时可禁用
+cmake -B build -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF
+```
 
 ### 常见构建矩阵
 
@@ -287,12 +298,12 @@ cmake -B build \
 
 ### SIMDe（SIMD Everywhere）
 
-CPU 热路径直接使用 x86 AVX2/FMA 内联函数。[SIMDe](https://github.com/simd-everywhere/simde) 是一个纯头文件库，可将这些 x86 内联函数翻译到其他指令集——在 ARM64/aarch64 上，同一份代码无需修改即可编译为 NEON。
+[SIMD 加速](#simd-加速)一节描述的各层级代码按 x86 内联函数编写。[SIMDe](https://github.com/simd-everywhere/simde) 是一个纯头文件库，可将这些 x86 内联函数翻译到其他指令集——在 ARM64/aarch64 上，模拟的 SSE4.2+FMA3 类代码无需修改即可编译为 NEON。
 
 CMake 的处理方式（`CMakeLists.txt`）：
 
-- **x86_64（GCC/Clang）**：SIMD 路径以 `-mavx -mavx2 -mfma` 编译，原生执行。
-- **ARM64/aarch64（含 Android 交叉编译）**：**必须**提供 SIMDe。CMake 会在 `/opt/homebrew/include`、`/usr/local/include`、`/usr/include` 与 `vendor/simde/` 中查找 `simde/x86/avx2.h`，找不到时配置直接报错。
+- **x86_64**：完全不需要 SIMDe——每个层级都在自己的指令集上原生执行。
+- **ARM64/aarch64（含 Android 交叉编译）**：SIMDe 为**可选**。CMake 会在 `/opt/homebrew/include`、`/usr/local/include`、`/usr/include`、`vendor/simde/`（或 `-DSIMDE_INCLUDE_DIR=<path>`）中查找 `simde/x86/sse4.2.h`：找到时经 NEON 模拟 SSE4.2+FMA3 类（此时标量层甚至不会被编译——非 x86 的分派总是直接选择模拟类）；找不到时自动降级为纯标量内核。
 
 获取 SIMDe：
 
@@ -308,7 +319,7 @@ git clone --depth=1 https://github.com/simd-everywhere/simde.git
 cmake -B build -DSIMDE_INCLUDE_DIR=/path/to/simde
 ```
 
-x86_64 构建不需要 SIMDe。Android 相关细节见 [docs/build-android.md](docs/build-android.md)。
+Android 相关细节见 [docs/build-android.md](docs/build-android.md)。
 
 ### 音频后端与 FFmpeg
 
@@ -341,15 +352,24 @@ FFmpeg 使用要点：
 
 - 本仓库代码采用 MIT 许可。FFmpeg 预编译包可能是 LGPL 或 GPL，取决于编译选项。使用包含 GPL 编码器的 FFmpeg 构建并重新分发时，可能会对你的发行物带来 GPL 约束。详见 [FFmpeg-NOTICE.md](FFmpeg-NOTICE.md)。
 
+## SIMD 加速
+
+CPU 侧 DSP 路径（FFT、mel/频谱 kernel、log/sincos 数学助手）全部用内联函数手写，按**编译期层级（tier）**组织，由**运行时分派**按 CPUID 探测结果选择。因此单一二进制就能在从 SSE4.2 时代到 AVX10 的所有机器上自动跑出最快的可用路径，无需分发多个版本，也不会在旧机器上触发非法指令。
+
+- 层级：**标量**、**SSE4.2（+FMA3）**、**AVX**、**AVX2**、**AVX-512**（需 F+BW+DQ+VL 与操作系统启用配套状态）、**AVX10.1**——Panther Lake / Nova Lake 及以后的型号经 CPUID leaf 0x24H 独立检测；其 512 位模式直接复用 AVX-512 层，只有 256 位类是独立层。无需任何配置：枚举出 AVX10 的 CPU 会自动获得对应路径。
+- ARM64（含 Android）上，SSE4.2+FMA3 层可通过 [SIMDe](#simdesimd-everywhere) 在 NEON 上模拟；没有 SIMDe 时自动降级为纯标量。
+
+构建期开关（默认全部 ON）：`-DCOSYVOICE_NO_SIMD=ON` 关闭全部 SIMD；`-DCOSYVOICE_HAS_SCALAR`、`_SSE42`、`_AVX`、`_AVX2`、`_AVX512`、`_AVX10_1` 逐类关闭（关闭 SSE4.2 会级联关闭更高的 legacy 层；AVX10-256 层需要工具链认识其编译参数，否则静默跳过）。Debug 构建启动时会打印检测到的能力集合。层级布局、分派规则与 AVX10 策略的完整细节见 [docs/SIMD_zh.md](docs/SIMD_zh.md)。
+
 ## 流式 TTS 与 DiT KV 缓存
 
 流式 TTS 在合成过程中通过回调函数逐段交付音频，无需等待完整语句生成完毕即可开始播放，从而实现实时播放与更低的主观延迟。
 
-流式流水线引入了 **DiT KV 缓存** 以避免冗余计算。非流式推理时，DiT 模块运行 10 步扩散，每步对完整音频序列计算自注意力——总共会执行 10 次注意力重算。KV 缓存跨扩散步存储中间 key/value 张量，使每个位置只需计算一次。
+每个块都要跑完 DiT 的 10 步扩散——若无缓存，每个新块的每一步都会对此前已产出的整个音频序列重算注意力。**DiT KV 缓存**按扩散步保存已产出位置的注意力 key/value（每个扩散步一个缓存槽位），新块只计算自己新增的位置：每个位置在每个步上只计算一次，之后的所有块直接复用。
 
 ### 槽位组织
 
-DiT KV 缓存按 **槽位（slot）** 组织，每个槽位对应一个扩散步的 KV 缓存。默认 10 个扩散步意味着最多 10 个槽位。
+DiT KV 缓存按 **槽位（slot）** 组织，每个槽位对应一个扩散步的 KV 缓存。扩散步数固定为 10，因此设备槽位至多 10 个。
 
 槽位分为三类：
 
@@ -359,11 +379,7 @@ DiT KV 缓存按 **槽位（slot）** 组织，每个槽位对应一个扩散步
 | **可卸载** | 不使用时卸载到 CPU | 节省设备显存，但增加传输开销 |
 | **不缓存** | 不存储 | 每步全量重算注意力，无额外内存开销 |
 
-**步-槽位映射。** 扩散步按顺序排列：不缓存步在最前，接着是可卸载步，最后是固定步。每个**固定**步独占一个设备槽位。所有**可卸载**步共享同一个临时槽位（设备槽 0）：某步先在临时槽位计算，随后立即把 KV 拷贝到它自己的 CPU 缓冲区，下一步再从缓冲区拷贝回来——因此卸载只需要一个设备槽位，外加每个可卸载步各一个 CPU 缓冲区。
-
-**自动归一化。** 单个可卸载槽位（`fixed=0, offloadable=1`）会被转为固定槽位（`fixed=1, offloadable=0`）：每个 chunk 一次 CPU 往返外加一个临时槽位，其代价严格高于直接常驻。两个数量还会被裁剪，保证 `fixed + offloadable` 不超过 10 个扩散步。
-
-总槽位数 = `固定 + 可卸载`。剩余步（10 − 总槽位）使用全量重算。
+**步-槽位映射。** 扩散步按顺序排列——不缓存步在最前，然后是可卸载步，最后是固定步。固定步各独占一个设备槽位；可卸载步共享同一个设备临时槽（设备槽 0），并各自持有一个 CPU 缓冲区来拷贝 KV。可卸载槽数恰好为 1 时会被归一化为固定槽位（`offloadable=1 → fixed+1`），且两个数量都会被裁剪，保证 `fixed + offloadable` 不超过 10 个扩散步。总缓存步数 = `固定 + 可卸载`，其余步全量重算。内部槽位/调度布局详见 [docs/API_zh_cosyvoice.md — DiT KV 缓存概念](docs/API_zh_cosyvoice.md#dit-kv-缓存概念)。
 
 KV 缓存占用较大，因此默认 0 个槽位（全部 10 步全量重算）。启用缓存后，若序列长度超过配置的缓存长度，会丢弃部分位置——推理可正常继续，但输出质量可能下降。可卸载槽位需要和设备与 CPU 间传输数据，可能无法带来速度提升，甚至比全量重算更慢。
 
@@ -371,12 +387,12 @@ KV 缓存占用较大，因此默认 0 个槽位（全部 10 步全量重算）�
 
 ### 配置
 
-DiT KV 缓存参数通过 CLI/server 的 `--dit-kv-*` 参数配置：
+DiT KV 缓存参数通过 CLI/server 的 `--dit-kv-*` 参数配置（context 参数——CLI 侧作用于交互/流式模式）：
 
-- `--dit-kv-cache-type`：DiT KV 缓存存储格式（f32/f16/q8_0/...）。
-- `--dit-kv-fixed-slots`：常驻设备内存的槽位数。
-- `--dit-kv-offloadable-slots`：可卸载到 CPU 的槽位数。
-- `--dit-kv-cache-length`：缓存保留的最大序列位置数。
+- `--dit-kv-cache-type`：缓存存储格式——`f32`/`f16`/`q8_0`/`q5_1`/`q5_0`/`q4_1`/`q4_0`，或 K/V 独立指定的非对称格式（`k=<type>,v=<type>[,fallback=<type>]`，与 `--llm-kv-cache-type` 同风格）。
+- `--dit-kv-fixed-slots`：常驻设备内存的槽位数。默认：`0`。
+- `--dit-kv-offloadable-slots`：可卸载到 CPU 的槽位数。默认：`0`。
+- `--dit-kv-cache-length`：缓存保留的最大序列位置数。默认：`0` = 最大 LLM 长度 × 10。
 
 建议的起点（共 10 个扩散步）：
 
@@ -464,6 +480,7 @@ python convert_model_to_gguf.py \
 ## 文档
 - API 索引：[docs/API_zh.md](docs/API_zh.md)
 - 工具说明：[docs/TOOLS_zh.md](docs/TOOLS_zh.md)
+- SIMD 层级架构（开发者参考）：[docs/SIMD_zh.md](docs/SIMD_zh.md)
 - Android 构建指南：[docs/build-android_zh.md](docs/build-android_zh.md)
 
 ## AI 使用说明
@@ -473,8 +490,9 @@ python convert_model_to_gguf.py \
 
 ## 第三方许可说明
 - 已打包依赖的许可证信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+- 核心张量计算库：**GGML**（MIT，vendored/自动克隆）——从 llama.cpp 拆分出的底座；构建时会打上一个小 Metal 补丁。
+- **llama.cpp**（MIT）：tokenizer 实现基于其改造；**ONNX Runtime**（MIT）、**ICU**（Unicode 许可）与 **SIMDe**（MIT，可选）分别支撑前端与 SIMD 模拟。
 - FFT 实现参考/改造自 KissFFT（BSD-3-Clause），并加入了项目内 SIMD 优化；详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-- tokenizer 实现基于 llama.cpp（MIT）改造。
 
 ## 许可证说明
 - **本仓库代码**：MIT（见 `LICENSE`）。

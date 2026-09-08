@@ -1,21 +1,11 @@
 #include "cosyvoice-internal.h"
 #include "cosyvoice-model.h"
 #include "cosyvoice-kv-cache.h"
+#include "simd-kernels.h"
 
 #include <algorithm>
 #include <span>
 #include <ranges>
-#include <format>
-
-#if defined(__x86_64__) || defined(_M_X64)
-#include <immintrin.h>
-#elif defined(__aarch64__) || defined(_M_ARM64)
-#define SIMDE_ENABLE_NATIVE_ALIASES
-#include <simde/x86/avx2.h>
-#include <simde/x86/fma.h>
-#else
-#error "src/cosyvoice-llm.cpp requires x86_64 SIMD intrinsics or SIMDe on ARM64; unsupported architecture"
-#endif
 
 static void build_causal_mask(ggml_fp16_t* mask, uint32_t n_batch, uint32_t seq_len)
 {
@@ -317,6 +307,8 @@ bool cosyvoice_model_3::llm_decode(ggml_type type, const void* data)
     return false;
 }
 
+
+
 void cosyvoice_model_3::llm_prepare_probs(bool allow_stop_tokens)
 {
     GGML_ASSERT(worker->llm_probs);
@@ -351,46 +343,8 @@ void cosyvoice_model_3::llm_prepare_probs(bool allow_stop_tokens)
         for (auto token_id : cv3_shared->stop_tokens)
             raw_probs[token_id] = 0;
 
-        uint32_t i = 0;
-        __m256 sum256 = _mm256_setzero_ps();
-        for (; i + 7 < vocab_size; i += 8)
-        {
-            __m256 prob256 = _mm256_loadu_ps(raw_probs + i);
-            sum256 = _mm256_add_ps(sum256, prob256);
-        }
-
-        __m128 vlow = _mm256_castps256_ps128(sum256);
-        __m128 vhigh = _mm256_extractf128_ps(sum256, 1);
-        __m128 sum128 = _mm_add_ps(vlow, vhigh);
-        for (; i + 3 < vocab_size; i += 4)
-        {
-            __m128 prob256 = _mm_loadu_ps(raw_probs + i);
-            sum128 = _mm_add_ps(sum128, prob256);
-        }
-
-        __m128 shuf = _mm_movehdup_ps(sum128);
-        __m128 sums = _mm_add_ps(sum128, shuf);
-        shuf = _mm_movehl_ps(shuf, sums);
-        sums = _mm_add_ss(sums, shuf);
-
-        float sum = _mm_cvtss_f32(sums);
-        for (; i < vocab_size; ++i)
-            sum += raw_probs[i];
-        sum256 = _mm256_set1_ps(sum);
-        for (i = 0; i + 7 < vocab_size; i += 8)
-        {
-            __m256 prob256 = _mm256_loadu_ps(raw_probs + i);
-            prob256 = _mm256_div_ps(prob256, sum256);
-            _mm256_storeu_ps(raw_probs + i, prob256);
-        }
-        for (sum128 = _mm_set_ps1(sum); i + 3 < vocab_size; i += 4)
-        {
-            __m128 prob256 = _mm_loadu_ps(raw_probs + i);
-            prob256 = _mm_div_ps(prob256, sum128);
-            _mm_storeu_ps(raw_probs + i, prob256);
-        }
-        for (; i < vocab_size; ++i)
-            raw_probs[i] /= sum;
+        const float sum = simd_dispatch<sum_kernel>(raw_probs, vocab_size);
+        simd_dispatch<div_kernel>(raw_probs, vocab_size, sum);
     }
 }
 

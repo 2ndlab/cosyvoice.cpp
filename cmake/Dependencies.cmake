@@ -39,7 +39,7 @@ else()
 endif()
 
 set(GGML_PINNED_COMMIT
-    "af97976c7810cdabb1863172f31c432dab767de7"
+    "e91ded11bdcd78c42f9c8d3978ff6686eb4c1226"  # v0.23.0
     CACHE STRING "Pinned ggml commit for the Metal PAD patch. Only used when Metal is enabled.")
 
 if(_GGML_USES_METAL)

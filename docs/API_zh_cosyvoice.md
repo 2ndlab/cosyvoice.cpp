@@ -383,8 +383,12 @@ typedef struct cosyvoice_context_params
     uint32_t seed;
     cosyvoice_builtin_sampler_rng_policy_t builtin_sampler_rng_policy;
 
-    cosyvoice_sampler_t sampler;
-    void*               sampler_ctx;
+    union
+    {
+        cosyvoice_sampler_t     sampler;      // 普通自定义采样器
+        cosyvoice_sampler_ext_t sampler_ext;  // 带 worker 编号的自定义采样器（同一存储）
+    };
+    void*                     sampler_ctx;
 } cosyvoice_context_params_t;
 ```
 
@@ -407,6 +411,7 @@ typedef struct cosyvoice_context_params
 - `seed`：随机种子。
 - `builtin_sampler_rng_policy`：内置采样器 RNG 策略。
 - `sampler`：自定义采样器，`NULL` 表示使用内置采样器。
+- `sampler_ext`：带 worker 编号的自定义采样器，与 `sampler` 共用同一存储。运行时始终以扩展签名调用回调（末位多一个 `worker_no` 参数）；在此槽位放一个普通 `cosyvoice_sampler_t` 也可以，多余参数会被忽略。
 - `sampler_ctx`：传入采样回调的用户上下文。
 
 ## cosyvoice_init_backend
@@ -537,6 +542,17 @@ typedef struct cosyvoice_context_params_v2
     cosyvoice_context_params_t base_params;
     uint32_t n_workers;
 } cosyvoice_context_params_v2_t;
+
+#ifdef __cplusplus
+// 供 C++ 版 cosyvoice_load_from_file_ext 模板使用的扁平变体。
+// 与上方 C typedef 布局兼容：唯一区别是把结构体尾部的对齐间隙
+// 显式化为一个保留字段，使派生的 v3 结构体保持完全相同的成员偏移。
+struct cosyvoice_context_params_v2_cpp : cosyvoice_context_params_t
+{
+    uint32_t n_workers;
+    uint32_t reserved_tail_padding;
+};
+#endif
 ```
 
 ### 说明
@@ -547,6 +563,7 @@ typedef struct cosyvoice_context_params_v2
 
 - `base_params`：基础上下文参数。
 - `n_workers`：要创建的 worker 槽数量。
+- `reserved_tail_padding`（仅 C++ 变体）：占位保留字段，占据结构体尾部的对齐间隙——请置 0。
 
 ## cosyvoice_load_from_file_with_params_v2
 
@@ -634,13 +651,14 @@ struct cosyvoice_context_params_v3_cpp : cosyvoice_context_params_v2_cpp
     uint32_t dit_kv_fixed_slots;
     uint32_t dit_kv_offloadable_slots;
     uint32_t dit_kv_cache_length;
+    uint32_t reserved_tail_padding;
 };
 #endif
 ```
 
 ### 说明
 
-在 `cosyvoice_context_params_v2_t` 基础上增加 DiT（扩散模型）KV 缓存配置。流式 TTS 时 DiT 模块会运行多个扩散步，每步计算完整音频序列的自注意力——KV 缓存可以跨步复用注意力计算结果，但缓存本身非常大（最多 `sequence_length × n_diffusion_steps` 个 key-value 对）。
+在 `cosyvoice_context_params_v2_t` 基础上增加 DiT（扩散模型）KV 缓存配置。流式 TTS 时每个块都要跑完 DiT 的全部扩散步——没有缓存时，每个新块的每一步都会对已产出的整个音频序列重算自注意力。KV 缓存按扩散步保存已产出位置的注意力 key/value（每个扩散步一个缓存槽位），新块只需计算自己新增的位置——但缓存本身非常大（合计最多 `sequence_length × n_diffusion_steps` 个 key-value 对）。
 
 ### 成员
 
