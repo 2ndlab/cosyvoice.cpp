@@ -73,7 +73,7 @@ Binary releases are self-contained on **macOS (arm64)** — they bundle the patc
 3. Place the `cosyvoice` executables into the same directory as the GGML backend shared libraries (`ggml.dll`, `ggml-cuda.dll`, etc.).
 4. Run from that directory.
 
-> **Known issue with pre-built GGML CUDA backend (Issue [#15](https://github.com/Lourdle/cosyvoice.cpp/issues/15)):** Some users have reported noise in generated audio when using pre-built GGML binaries from `llama.cpp` releases with the CUDA backend. Testing confirmed this issue with pre-compiled GGML CUDA builds, while self-compiled GGML from source did not exhibit the problem. If you encounter noise when using the CUDA backend with pre-built GGML, we recommend building both this project and GGML from source as a workaround. Refer to the [Build](#build) section for instructions.
+> **Known issue with pre-built GGML CUDA backend (Issue [#15](https://github.com/Lourdle/cosyvoice.cpp/issues/15)):** Some users have reported noise in generated audio when using pre-built GGML binaries from `llama.cpp` releases with the CUDA backend. Testing confirmed this issue with pre-compiled GGML CUDA builds, while self-compiled GGML from source did not exhibit the problem. If you encounter noise when using the CUDA backend with pre-built GGML, we recommend building both this project and GGML from source as a workaround. Refer to the [Build](#build) section for instructions. Alternatively, if building from source is not desirable, use the **Vulkan backend** — it works with the pre-built GGML releases out of the box.
 
 ### Build from Source
 
@@ -130,11 +130,11 @@ Full commands, options, and examples are documented in [docs/TOOLS.md](docs/TOOL
 ## Build
 
 ### Requirements
-- CMake >= 3.24
+- CMake >= 3.28
 - C/C++ toolchain with C++20 support
 - Git (used to fetch GGML automatically when missing)
-- x86 CPU with AVX2 support is currently required for parts of the CPU data path
-- For CPU math-heavy paths (for example `log` and trigonometric functions), SIMD acceleration is currently enabled only in MSVC builds; other toolchains currently fall back to scalar implementations
+- No specific x86 ISA is required: CPU DSP paths use runtime dispatch and automatically fall back to the best tier the CPU supports (down to the plain x86-64 scalar baseline) — see [SIMD Acceleration](#simd-acceleration)
+- SIMD math paths (for example `log` and trigonometric functions) are compiled per tier on all supported toolchains (MSVC `/arch:...`, GCC/Clang `-m...`); non-x86 targets optionally emulate the SSE4.2+FMA3 class via SIMDe and otherwise fall back to scalar
 
 Backend/runtime requirements depend on your build options (CUDA/Vulkan/CPU, ONNX Runtime, ICU, etc.).
 

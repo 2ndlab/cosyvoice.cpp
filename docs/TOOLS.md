@@ -65,13 +65,19 @@ Ready-to-use tensor maps are available under `tools/quantize/profiles/`, organiz
 ```
 tools/quantize/profiles/
 └── cosyvoice3-2512/
+    ├── Q2_K.json
+    ├── Q2_K_L.json
+    ├── Q3_K_M.json
+    ├── Q3_K_S.json
+    ├── Q4_K_M.json
     ├── Q4_K_S.json
-    └── Q4_K_M.json
+    ├── Q5_K_M.json
+    └── Q5_K_S.json
 ```
 
 Example:
 ```bash
-quantize -f model.gguf -o model-q4_k_-_s.gguf -t Q4_K -M tools/quantize/profiles/cosyvoice3-2512/Q4_K_S.json
+quantize -f model.gguf -o model-q4_k_s.gguf -t Q4_K -M tools/quantize/profiles/cosyvoice3-2512/Q4_K_S.json
 ```
 
 Custom metadata strings are supported with repeated `-c/--custom-string`.
@@ -170,7 +176,7 @@ The WebUI provides a modern single-page application with the following capabilit
 | `--host <host>` | Listen host. Default: `127.0.0.1`. |
 | `--port <port>` | Listen port. Default: `8080`. |
 | `--api-key <key>` | Require `Authorization: Bearer <key>` on all API routes (`POST /v1/audio/speech`, etc.). When set, the WebUI is also protected behind a login page that accepts the same API key. |
-| `--concurrency <value>` | Concurrent request slots. Default: `1` (API mode only; WebUI mode is single-slot). |
+| `--concurrency, -c <value>` | Concurrent request slots. Default: `1` (API mode only; WebUI mode is single-slot). |
 
 ### Mode Selection
 
@@ -649,21 +655,6 @@ Additional options for streaming:
 - `--chunk-tokens <value>`: Tokens per streaming chunk (0 = model default).
 - `--no-play`: Disable real-time playback even with `--stream` (useful for saving streaming output to file).
 
-#### `tools/server/batch_tts_stress_test.py`
-
-Concurrent stress test helper that sends multiple concurrent requests and keeps all generated audio files.
-
-```bash
-python tools/server/batch_tts_stress_test.py \
-  --base-url http://127.0.0.1:8080 \
-  --model cosyvoice-3 \
-  --workers 4 \
-  --repeat 8 \
-  --out-dir build/bin/Release/server_batch
-```
-
-This script prints per-request output file paths so you can listen and compare results.
-
 ## CLI Tool (`tools/cli`)
 Executable name: `cosyvoice-cli`
 
@@ -725,7 +716,7 @@ Type text at the `> ` prompt to synthesize, or use slash commands:
 - `/delete [code]`: Delete cached audio.
 - `/clear`: Clear cached audio.
 - `/seed [value]`: Show or set next seed.
-- `/seed-policy <fixed|random>`: Show or set seed policy.
+- `/seed-policy <auto|fixed|random>`: Show or set seed policy.
 - `/stream`: Toggle streaming playback (audio plays progressively during generation).
 - `/chunk-tokens [value]`: Show or set tokens per streaming chunk.
 - `/help`: Show command list.
@@ -749,6 +740,7 @@ Core options:
   - `COSYVOICE_NO_AUDIO=ON`: output is always WAV.
 - `--speed, -s <value>`: Speech speed multiplier. Default: `1.0`. Must be `> 0`.
 - `--seed <value>`: Random seed for sampling and internal noise generation. Must be an unsigned 32-bit integer. Default: random.
+- `--seed-policy <auto|fixed|random>`: Seed strategy. `auto` = `fixed` if `--seed` is given, otherwise `random`. Default: `auto`. Ignored in `--frontend-only` mode (warning will be printed).
 - `--max-llm-len <value>`: Maximum input token count for LLM (`n_max_seq`). Default: `2048`. Must be a positive integer.
 - `--threads, -j <value>`: CPU thread count for model inference. Must be an unsigned 32-bit integer. Default: `0` (use current hardware concurrency).
 - `--llm-kv-cache-type <f32|f16|q8_0|q5_1|q5_0|q4_1|q4_0|k=<type>,v=<type>[,fallback=<type>]>`: LLM KV cache type. Single type (e.g. `q8_0`) uses the same format for K and V. Use separate K/V types (e.g. `k=q8_0,v=q4_0`) for different formats. Default: `k=q8_0,v=q4_0,fallback=q8_0`.

@@ -396,13 +396,10 @@ COSYVOICE_API bool cosyvoice_audio_save_to_file(
 
 ### 备注
 
-编码格式由输出文件扩展名决定：
+编码格式由输出文件扩展名决定，具体行为取决于音频后端：
 
-- `.wav` -> WAV
-- `.flac` -> FLAC
-- `.mp3` -> MP3
-
-如果没有扩展名，或扩展名不受支持，函数会回退为 WAV，并输出一条告警日志（`"Unknown audio file extension, defaulting to WAV format"`）。
+- **MINIAUDIO（默认）**：始终写入 WAV。除 `.wav` 以外的扩展名（或缺少扩展名）会输出一条告警日志（`"Unknown audio file extension, defaulting to WAV format"`），并按 WAV 写入。
+- **FFMPEG**：按扩展名推断 `.wav` / `.mp3` / `.aac` / `.flac` / `.m4a` / `.opus`（实际可用子集取决于所链接 FFmpeg 运行时提供的编码器）。无法识别的扩展名会输出告警日志（`"Unrecognized file extension (...), defaulting to WAV format."`）并回退为 WAV。
 
 扩展名匹配不区分大小写，因此像 `.WAV` 这类大写扩展名也会被正确识别。
 

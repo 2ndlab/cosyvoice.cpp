@@ -71,8 +71,10 @@ configurations like "AVX10-256 enabled, SSE4.2/AVX/AVX2 disabled".
   even though the 512 branch never emits 128/256-bit EVEX itself, because the
   compilers' own spill forms use EVEX xmm16+/ymm16+. Partial parts (Knights
   Landing: F alone) fall through to AVX2.
-- **AVX10** — CPUID leaf 0x24H (independent of the legacy bits, because
-  AVX10-only parts do not enumerate them): `EAX[7:0]` = version (1 = AVX10.1,
+- **AVX10** — CPUID leaf 0x24H (independent of the leaf-7 legacy AVX2/AVX-512
+  enumeration, because AVX10-only parts do not set those bits; it still sits
+  behind the leaf-1 OSXSAVE+AVX and XGETBV checks above, which any AVX10 part
+  passes): `EAX[7:0]` = version (1 = AVX10.1,
   2 = AVX10.2), `EBX bit16` = 256-bit, `EBX bit17` = 512-bit.
   256 class also requires `XCR0 & 0x26 == 0x26` (opmask); 512 the full
   `0xE6`. Version ≥ 1 gates both classes; 10.2 lights the same bits as 10.1.
@@ -130,7 +132,7 @@ dedicated class: a new caps bit + preset + tier TU + dispatch case above the
 | CMake cache entry | Compile definition | Gate |
 |---|---|---|
 | `COSYVOICE_NO_SIMD` | `COSYVOICE_NO_SIMD` | kills all SIMD code (auto-set on non-x86 without SIMDe) |
-| `COSYVOICE_HAS_SCALAR` | `COSYVOICE_HAS_SCALAR` | scalar tier object; also built whenever `x86` (dispatch fallback) — on non-x86 + SIMDe it is skipped (never dispatched) |
+| `COSYVOICE_HAS_SCALAR` | `COSYVOICE_HAS_SCALAR` | the scalar *dispatch* fallback case; on x86 the tier object itself is built regardless of this option — on non-x86 + SIMDe it is skipped (never dispatched) |
 | `COSYVOICE_HAS_SSE42` / `_AVX` / `_AVX2` / `_AVX512` | same names | each legacy tier |
 | `COSYVOICE_HAS_AVX10_1` | `COSYVOICE_HAS_AVX10_1_256` | the AVX10-256 tier only (plus a compiler-flag probe) |
 
