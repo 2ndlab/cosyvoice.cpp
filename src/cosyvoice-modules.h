@@ -8,7 +8,6 @@
 #include <memory>
 #include <vector>
 #include <string>
-#include <map>
 
 struct gguf_loader;
 
@@ -21,29 +20,9 @@ constexpr size_t get_aligned_size(size_t size, size_t alignment)
         return size & ~(alignment - 1);
 }
 
-struct Module
+struct BasicModule
 {
-    virtual void OnLoad(const gguf_loader& loader, const std::string& prefix);
-
-    std::map<std::string, ggml_tensor**> tensors;
-    std::map<std::string, Module*> submodules;
-
-    std::map<std::string, ggml_tensor**> get_all_tensors()
-    {
-        auto all_tensors = tensors;
-        for (const auto& [name, submodule] : submodules)
-        {
-            auto sub_tensors = submodule->get_all_tensors();
-            for (auto& kv : sub_tensors)
-                all_tensors.insert(std::move(kv));
-        }
-        return all_tensors;
-    }
-};
-
-struct BasicModule : Module
-{
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     ggml_tensor* weight;
     ggml_tensor* bias;
@@ -63,63 +42,63 @@ struct LayerNorm : BasicModule
 {
     constexpr static float eps = 1e-6f;
 
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* x) const;
 };
 
 
-struct CausalConvPositionEmbedding : Module
+struct CausalConvPositionEmbedding
 {
     Conv1d conv1;
     Conv1d conv2;
 
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* x, ggml_backend_op_capabilities capabilities) const;
 };
 
-struct InputEmbedding : Module
+struct InputEmbedding
 {
     Linear proj;
 
     CausalConvPositionEmbedding conv_pos_embed;
 
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* x, ggml_tensor* cond, ggml_tensor* text_embed, ggml_tensor* spks, ggml_backend_op_capabilities capabilities) const;
 };
 
-struct SinusPositionEmbedding : Module
+struct SinusPositionEmbedding
 {
     ggml_tensor* emb = nullptr;
 
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* x) const;
 };
 
-struct TimestepEmbedding : Module
+struct TimestepEmbedding
 {
     SinusPositionEmbedding time_embed;
     Linear time_mlp_0;
     Linear time_mlp_2;
 
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* t) const;
 };
 
-struct AdaLayerNormZero : Module
+struct AdaLayerNormZero
 {
     Linear linear;
 
     LayerNorm norm;
 
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     std::array<ggml_tensor*, 5> build_cgraph(ggml_context* ctx, ggml_tensor* x, ggml_tensor* emb) const;
 };
 
-struct Attention : Module
+struct Attention
 {
     int heads;
     bool fattn;
@@ -129,22 +108,22 @@ struct Attention : Module
     Linear to_v;
     Linear to_out;
 
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* x, ggml_tensor* position_ids, int64_t cut_len, cosyvoice_kv_cache* kv_cache, ggml_cgraph* gf, ggml_tensor* attn_mask, int layer_idx) const;
 };
 
-struct FeedForward : Module
+struct FeedForward
 {
     Linear ff_0_0;
     Linear ff_2;
 
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* x) const;
 };
 
-struct DiTBlock : Module
+struct DiTBlock
 {
     AdaLayerNormZero attn_norm;
     Attention attn;
@@ -152,23 +131,23 @@ struct DiTBlock : Module
     LayerNorm ff_norm;
     FeedForward ff;
 
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* x, ggml_tensor* time_emb, ggml_tensor* position_ids, int64_t cut_len, cosyvoice_kv_cache* kv_cache, ggml_cgraph* gf, ggml_tensor* attn_mask, int layer_idx) const;
 };
 
-struct AdaLayerNorm_Final : Module
+struct AdaLayerNorm_Final
 {
     Linear linear;
 
     LayerNorm norm;
 
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* x, ggml_tensor* emb) const;
 };
 
-struct DiT : Module
+struct DiT
 {
     TimestepEmbedding time_embed;
     InputEmbedding input_embed;
@@ -181,12 +160,12 @@ struct DiT : Module
     int mel_dim;
     constexpr static int static_chunk_size = 50;
 
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* x, ggml_tensor* mu, ggml_tensor* t, ggml_tensor* spks, ggml_tensor* cond, int64_t cut_len, ggml_tensor*& position_ids, ggml_backend_op_capabilities capabilities, cosyvoice_kv_cache* kv_cache, ggml_tensor** ref_attn_mask, ggml_cgraph* gf) const;
 };
 
-struct CausalConditionalCFM : Module
+struct CausalConditionalCFM
 {
     constexpr static int diffusion_steps = 10;
     std::array<float, diffusion_steps + 1> t_span;
@@ -194,7 +173,7 @@ struct CausalConditionalCFM : Module
 
     DiT estimator;
 
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     struct DiTContext
     {
@@ -210,19 +189,19 @@ struct CausalConditionalCFM : Module
     ggml_tensor* build_cgraph_one_step(ggml_context* ctx, const DiTContext& ditctx, int step, ggml_backend_op_capabilities capabilities, int64_t cut_len, ggml_tensor*& t_tensor, ggml_tensor*& position_ids, ggml_cgraph* gf, cosyvoice_kv_cache* kv_cache, ggml_tensor** attn_mask) const;
 };
 
-struct PreLookaheadLayer : Module
+struct PreLookaheadLayer
 {
     int pre_lookahead_len;
 
     Conv1d conv1;
     Conv1d conv2;
 
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* inputs, bool streaming, uint32_t cut_len) const;
 };
 
-struct CausalMaskedDiffWithDiT : Module
+struct CausalMaskedDiffWithDiT
 {
     int token_mel_ratio;
 
@@ -231,7 +210,7 @@ struct CausalMaskedDiffWithDiT : Module
     PreLookaheadLayer pre_lookahead_layer;
     CausalConditionalCFM decoder;
 
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     struct EncodeResult
     {
@@ -266,11 +245,11 @@ struct CausalConv1d : CausalConv1dBase
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* x, bool finalize) const;
 };
 
-struct CausalConvRNNF0Predictor : Module
+struct CausalConvRNNF0Predictor
 {
     CausalConvRNNF0Predictor();
 
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     CausalConv1d condnet_0;
     CausalConv1d condnet_2;
@@ -283,16 +262,16 @@ struct CausalConvRNNF0Predictor : Module
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* x, bool finalize) const;
 };
 
-struct SineGen2 : Module
+struct SineGen2
 {
     ggml_tensor* rand_ini;
 
     std::array<ggml_tensor*, 2> build_cgraph(ggml_context* ctx, ggml_tensor* f0, int harmonic_num, int sampling_rate, int upsample_scale, float sine_amp, int voiced_threshold, float noise_std) const;
 };
 
-struct SourceModuleHnNSF : Module
+struct SourceModuleHnNSF
 {
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     SineGen2 l_sin_gen;
     Linear l_linear;
@@ -300,9 +279,9 @@ struct SourceModuleHnNSF : Module
     std::array<ggml_tensor*, 2> build_cgraph(ggml_context* ctx, ggml_tensor* x, int harmonic_num, int sampling_rate, int upsample_scale, float sine_amp, int voiced_threshold, float noise_std) const;
 };
 
-struct Snake : Module
+struct Snake
 {
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     static constexpr float no_div_by_zero = 0.000000001f;
     ggml_tensor* alpha;
@@ -310,9 +289,9 @@ struct Snake : Module
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* x) const;
 };
 
-struct ResBlock : Module
+struct ResBlock
 {
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     std::vector<std::tuple<Snake, CausalConv1d, Snake, CausalConv1d>> convs;
 
@@ -331,9 +310,9 @@ struct CausalConv1dUpsample : CausalConv1dBase
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* x) const;
 };
 
-struct CausalHiFTGenerator : Module
+struct CausalHiFTGenerator
 {
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     CausalConvRNNF0Predictor f0_predictor;
     SourceModuleHnNSF m_source;
@@ -364,9 +343,9 @@ struct CausalHiFTGenerator : Module
     istft_context_ptr ictx;
 };
 
-struct Qwen2MLP : Module
+struct Qwen2MLP
 {
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* x) const;
 
@@ -375,18 +354,18 @@ struct Qwen2MLP : Module
     Linear down_proj;
 };
 
-struct Qwen2RMSNorm : Module
+struct Qwen2RMSNorm
 {
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     ggml_tensor* build_cgraph(ggml_context* ctx, ggml_tensor* hidden_states, float variance_epsilon) const;
 
     ggml_tensor* weight;
 };
 
-struct Qwen2Attention : Module
+struct Qwen2Attention
 {
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     Linear q_proj;
     Linear k_proj;
@@ -394,9 +373,9 @@ struct Qwen2Attention : Module
     Linear o_proj;
 };
 
-struct Qwen2DecoderLayer : Module
+struct Qwen2DecoderLayer
 {
-    void OnLoad(const gguf_loader& loader, const std::string& prefix);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     Qwen2Attention self_attn;
     Qwen2MLP mlp;
@@ -404,9 +383,9 @@ struct Qwen2DecoderLayer : Module
     Qwen2RMSNorm post_attention_layernorm;
 };
 
-struct CosyVoice3LM : Module
+struct CosyVoice3LM
 {
-    void OnLoad(const gguf_loader& loader, const std::string& prefix, const cosyvoice_context_params_t& params);
+    void OnLoad(gguf_loader& loader, const std::string& prefix);
 
     ggml_tensor* embed_tokens_weight;
     ggml_tensor* speech_embedding_weight;

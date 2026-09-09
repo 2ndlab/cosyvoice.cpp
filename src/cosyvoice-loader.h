@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <utility>
 #include <format>
 
 #include "cosyvoice-internal.h"
@@ -114,4 +115,11 @@ struct gguf_loader : gguf_metadata_loader
         GGML_ASSERT(optional || tensor);
         return tensor;
     }
+
+    void register_tensor(const std::string& prefix, const char* name, ggml_tensor** tensor)
+    {
+        tensors.emplace_back(combine_prefix(prefix, name), tensor);
+    }
+
+    std::vector<std::pair<std::string, ggml_tensor**>> tensors;
 };

@@ -132,23 +132,20 @@ bool backend_looks_uma(ggml_backend_t backend, ggml_backend_buffer* buffer)
 
 #define LOAD_SUBMODULE_EX(name, module) do {\
     auto& _module = module;\
-    auto _name = combine_prefix(prefix, name);\
-    _module.OnLoad(loader, _name);\
-    this->submodules[std::move(_name)] = &_module;\
+    _module.OnLoad(loader, combine_prefix(prefix, name));\
 } while (false)
 #define LOAD_SUBMODULE(name) LOAD_SUBMODULE_EX(#name, name)
 
 #define LOAD_TENSOR_EX(name, obj) do {\
     this->obj = loader.get_gguf_tensor(prefix, name);\
-    this->tensors[combine_prefix(prefix, name)] = &this->obj;\
+    loader.register_tensor(prefix, name, &this->obj);\
 } while (false)
 #define LOAD_TENSOR(name) LOAD_TENSOR_EX(#name, name)
 
 #define LOAD_OPTIONAL_TENSOR_EX(name, obj) do {\
-    auto tensor = loader.get_gguf_tensor(prefix, name, true);\
-    this->obj = tensor;\
-    if (tensor)\
-        this->tensors[combine_prefix(prefix, name)] = &this->obj;\
+    this->obj = loader.get_gguf_tensor(prefix, name, true);\
+    if (this->obj)\
+        loader.register_tensor(prefix, name, &this->obj);\
 } while (false)
 #define LOAD_OPTIONAL_TENSOR(name) LOAD_OPTIONAL_TENSOR_EX(#name, name)
 
@@ -172,46 +169,43 @@ static inline float get_tensor_eps(const ggml_tensor* tensor)
         : 0.0f;
 }
 
-
-void Module::OnLoad(const gguf_loader& loader, const std::string& prefix) {}
-
-void BasicModule::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void BasicModule::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_TENSOR(weight);
     LOAD_OPTIONAL_TENSOR(bias);
 }
 
-void LayerNorm::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void LayerNorm::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_OPTIONAL_TENSOR(weight);
     LOAD_OPTIONAL_TENSOR(bias);
 }
 
-void CausalConvPositionEmbedding::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void CausalConvPositionEmbedding::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_SUBMODULE_EX("conv1.0", conv1);
     LOAD_SUBMODULE_EX("conv2.0", conv2);
 }
 
-void InputEmbedding::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void InputEmbedding::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_SUBMODULE(proj);
     LOAD_SUBMODULE(conv_pos_embed);
 }
 
-void TimestepEmbedding::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void TimestepEmbedding::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_SUBMODULE_EX("time_mlp.0", time_mlp_0);
     LOAD_SUBMODULE_EX("time_mlp.2", time_mlp_2);
 }
 
-void AdaLayerNormZero::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void AdaLayerNormZero::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_SUBMODULE(linear);
     LOAD_SUBMODULE(norm);
 }
 
-void Attention::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void Attention::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_SUBMODULE(to_q);
     LOAD_SUBMODULE(to_k);
@@ -219,13 +213,13 @@ void Attention::OnLoad(const gguf_loader& loader, const std::string& prefix)
     LOAD_SUBMODULE_EX("to_out.0", to_out);
 }
 
-void FeedForward::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void FeedForward::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_SUBMODULE_EX("ff.0.0", ff_0_0);
     LOAD_SUBMODULE_EX("ff.2", ff_2);
 }
 
-void DiTBlock::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void DiTBlock::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_SUBMODULE(attn_norm);
     LOAD_SUBMODULE(attn);
@@ -233,13 +227,13 @@ void DiTBlock::OnLoad(const gguf_loader& loader, const std::string& prefix)
     LOAD_SUBMODULE(ff);
 }
 
-void AdaLayerNorm_Final::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void AdaLayerNorm_Final::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_SUBMODULE(linear);
     LOAD_SUBMODULE(norm);
 }
 
-void DiT::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void DiT::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_SUBMODULE(time_embed);
     LOAD_SUBMODULE(input_embed);
@@ -257,14 +251,13 @@ void DiT::OnLoad(const gguf_loader& loader, const std::string& prefix)
         auto name = std::format("{}.transformer_blocks.{}", prefix, i);
         block.OnLoad(loader, name);
         block.attn.heads = heads;
-        submodules[std::move(name)] = &transformer_blocks[i];
     }
 
     LOAD_SUBMODULE(norm_out);
     LOAD_SUBMODULE(proj_out);
 }
 
-void CausalConditionalCFM::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void CausalConditionalCFM::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_SUBMODULE(estimator);
 
@@ -274,7 +267,7 @@ void CausalConditionalCFM::OnLoad(const gguf_loader& loader, const std::string& 
         t_span[i] = 1.f - std::cos(0.1f * 0.5f * 3.14159265358979323846f * i);
 }
 
-void PreLookaheadLayer::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void PreLookaheadLayer::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_METADATA(pre_lookahead_len);
 
@@ -282,7 +275,7 @@ void PreLookaheadLayer::OnLoad(const gguf_loader& loader, const std::string& pre
     LOAD_SUBMODULE(conv2);
 }
 
-void CausalMaskedDiffWithDiT::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void CausalMaskedDiffWithDiT::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_METADATA(token_mel_ratio);
 
@@ -292,7 +285,7 @@ void CausalMaskedDiffWithDiT::OnLoad(const gguf_loader& loader, const std::strin
     LOAD_SUBMODULE(decoder);
 }
 
-void CausalConvRNNF0Predictor::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void CausalConvRNNF0Predictor::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_SUBMODULE_EX("condnet.0", condnet_0);
     LOAD_SUBMODULE_EX("condnet.2", condnet_2);
@@ -302,19 +295,19 @@ void CausalConvRNNF0Predictor::OnLoad(const gguf_loader& loader, const std::stri
     LOAD_SUBMODULE(classifier);
 }
 
-void SourceModuleHnNSF::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void SourceModuleHnNSF::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_SUBMODULE(l_linear);
 }
 
-void Snake::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void Snake::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_TENSOR(alpha);
 
     set_tensor_eps(alpha, 1e-6f);
 }
 
-void ResBlock::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void ResBlock::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     int64_t id;
     GGML_ASSERT(loader.find_metadata_key(combine_prefix(prefix, "dilations").c_str(), id));
@@ -338,7 +331,7 @@ void ResBlock::OnLoad(const gguf_loader& loader, const std::string& prefix)
     }
 }
 
-void CausalHiFTGenerator::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void CausalHiFTGenerator::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_SUBMODULE(f0_predictor);
     LOAD_SUBMODULE(m_source);
@@ -409,19 +402,19 @@ void CausalHiFTGenerator::OnLoad(const gguf_loader& loader, const std::string& p
     conv_post.causal_type = CausalConv1d::causal_type_t::left;
 }
 
-void Qwen2MLP::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void Qwen2MLP::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_SUBMODULE(gate_proj);
     LOAD_SUBMODULE(up_proj);
     LOAD_SUBMODULE(down_proj);
 }
 
-void Qwen2RMSNorm::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void Qwen2RMSNorm::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_TENSOR(weight);
 }
 
-void Qwen2Attention::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void Qwen2Attention::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_SUBMODULE(q_proj);
     LOAD_SUBMODULE(k_proj);
@@ -429,7 +422,7 @@ void Qwen2Attention::OnLoad(const gguf_loader& loader, const std::string& prefix
     LOAD_SUBMODULE(o_proj);
 }
 
-void Qwen2DecoderLayer::OnLoad(const gguf_loader& loader, const std::string& prefix)
+void Qwen2DecoderLayer::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_SUBMODULE(self_attn);
     LOAD_SUBMODULE(mlp);
@@ -437,7 +430,7 @@ void Qwen2DecoderLayer::OnLoad(const gguf_loader& loader, const std::string& pre
     LOAD_SUBMODULE(post_attention_layernorm);
 }
 
-void CosyVoice3LM::OnLoad(const gguf_loader& loader, const std::string& prefix, const cosyvoice_context_params_t& params)
+void CosyVoice3LM::OnLoad(gguf_loader& loader, const std::string& prefix)
 {
     LOAD_TENSOR_EX("embed_tokens.weight", embed_tokens_weight);
     LOAD_TENSOR_EX("speech_embedding.weight", speech_embedding_weight);
@@ -767,13 +760,9 @@ void cosyvoice_model_3::load(gguf_loader& loader)
 
     flow.OnLoad(loader, {});
     hift.OnLoad(loader, {});
-    llm.OnLoad(loader, {}, shared->params);
+    llm.OnLoad(loader, {});
 
-    auto tensors = llm.get_all_tensors();
-    for (auto& kv : flow.get_all_tensors())
-        tensors.insert(std::move(kv));
-    for (auto& kv : hift.get_all_tensors())
-        tensors.insert(std::move(kv));
+    auto& tensors = loader.tensors;
 
     ggml_init_params params =
     {
@@ -934,7 +923,7 @@ void cosyvoice_model_3::load(gguf_loader& loader)
     id = static_cast<int64_t>(loader.parser.arr_n(id));
     cv3_shared->stop_tokens.insert(stop_tok_data, stop_tok_data + id);
 
-    // FSQ silent and breath tokens — loaded from GGUF if available,
+    // FSQ silent and breath tokens �?loaded from GGUF if available,
     // otherwise fall back to hardcoded defaults matching CosyVoice3.
     id = loader.parser.find_key("silent_token_ids");
     if (id != -1)
