@@ -65,8 +65,14 @@ JSON 格式（key 为 PCRE2 正则表达式）：
 ```
 tools/quantize/profiles/
 └── cosyvoice3-2512/
+    ├── Q2_K.json
+    ├── Q2_K_L.json
+    ├── Q3_K_M.json
+    ├── Q3_K_S.json
+    ├── Q4_K_M.json
     ├── Q4_K_S.json
-    └── Q4_K_M.json
+    ├── Q5_K_M.json
+    └── Q5_K_S.json
 ```
 
 示例：
@@ -627,21 +633,6 @@ python tools/server/synthesize_via_api.py \
 - `--chunk-tokens <value>`：每个流式块的 token 数（0 = 模型默认）。
 - `--no-play`：即使启用 `--stream` 也禁用实时播放（用于将流式输出保存到文件）。
 
-#### `tools/server/batch_tts_stress_test.py`
-
-并发压测脚本，会并发发送多次请求并保留全部输出音频文件。
-
-```bash
-python tools/server/batch_tts_stress_test.py \
-  --base-url http://127.0.0.1:8080 \
-  --model cosyvoice-3 \
-  --workers 4 \
-  --repeat 8 \
-  --out-dir build/bin/Release/server_batch
-```
-
-脚本会输出每个请求对应的音频文件路径。
-
 ## CLI 工具（`tools/cli`）
 可执行文件名：`cosyvoice-cli`
 
@@ -703,7 +694,7 @@ cosyvoice-cli \
 - `/delete [code]`：删除缓存音频。
 - `/clear`：清空缓存。
 - `/seed [value]`：显示或设置下一次 seed。
-- `/seed-policy <fixed|random>`：显示或设置 seed 策略。
+- `/seed-policy <auto|fixed|random>`：显示或设置 seed 策略。
 - `/stream`：切换流式播放（生成过程中渐进播放音频）。
 - `/chunk-tokens [value]`：显示或设置每个流式块的 token 数。
 - `/help`：显示命令列表。
@@ -727,6 +718,7 @@ cosyvoice-cli \
   - `COSYVOICE_NO_AUDIO=ON`：输出始终为 WAV。
 - `--speed, -s <value>`：语速倍率，默认 `1.0`，必须大于 `0`。
 - `--seed <value>`：采样与内部噪声生成的随机种子，必须是无符号 32 位整数；默认随机。
+- `--seed-policy <auto|fixed|random>`：seed 策略。`auto` 表示给出 `--seed` 时按 `fixed`、否则按 `random`。默认 `auto`。`--frontend-only` 模式下忽略（会打印警告）。
 - `--max-llm-len <value>`：LLM 最大输入 token 数（`n_max_seq`），默认 `2048`，必须为正整数。
 - `--threads, -j <value>`：模型推理使用的 CPU 线程数，必须是无符号 32 位整数；默认 `0`（使用当前硬件并发数）。
 - `--llm-kv-cache-type <f32|f16|q8_0|q5_1|q5_0|q4_1|q4_0|k=<type>,v=<type>[,fallback=<type>]>`：LLM KV cache 类型。单一类型（如 `q8_0`）为 K 和 V 使用相同格式。可使用独立 K/V 类型（如 `k=q8_0,v=q4_0`）指定不同格式。默认 `k=q8_0,v=q4_0,fallback=q8_0`。

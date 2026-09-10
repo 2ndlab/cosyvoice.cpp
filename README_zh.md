@@ -73,7 +73,7 @@
 3. 将 `cosyvoice` 可执行文件放到包含 GGML 后端共享库（`ggml.dll`、`ggml-cuda.dll` 等）的同一目录。
 4. 在该目录下运行。
 
-> **预编译 GGML CUDA 后端已知问题（Issue [#15](https://github.com/Lourdle/cosyvoice.cpp/issues/15)）：** 有用户反馈使用 `llama.cpp` 预编译发布版的 GGML CUDA 后端时，生成的音频存在噪音。测试确认了预编译 GGML CUDA 版本存在此问题，而自行从源码编译的 GGML 则未出现该问题。如果您在使用 CUDA 后端配合预编译 GGML 时遇到噪音，建议参考本文[构建](#构建)章节，将本项目与 GGML 一同从源码编译。
+> **预编译 GGML CUDA 后端已知问题（Issue [#15](https://github.com/Lourdle/cosyvoice.cpp/issues/15)）：** 有用户反馈使用 `llama.cpp` 预编译发布版的 GGML CUDA 后端时，生成的音频存在噪音。测试确认了预编译 GGML CUDA 版本存在此问题，而自行从源码编译的 GGML 则未出现该问题。如果您在使用 CUDA 后端配合预编译 GGML 时遇到噪音，建议参考本文[构建](#构建)章节，将本项目与 GGML 一同从源码编译。如果不想自行编译，也可以直接改用 **Vulkan 后端**——它与 llama.cpp 的预编译 GGML 发布包配合良好，开箱即用。
 
 ### 从源码构建
 
@@ -130,11 +130,11 @@ flowchart TD
 ## 构建
 
 ### 环境要求
-- CMake >= 3.24
+- CMake >= 3.28
 - 支持 C++20 的 C/C++ 编译器
 - Git（当本地缺少 GGML 源码时用于自动拉取）
-- 目前 CPU 路径中的部分数据处理要求 x86 CPU 支持 AVX2
-- 对 CPU 侧数学运算较重的路径（如 `log`、三角函数），当前仅 MSVC 构建可启用 SIMD 加速；其他工具链目前回退为标量实现
+- 不要求特定的 x86 指令集：CPU DSP 路径通过运行时分派自动选择 CPU 支持的最快层级，最低可回退到纯 x86-64 标量基线（见 [SIMD 加速](#simd-加速)）
+- SIMD 数学路径（如 `log`、三角函数）在所有受支持的工具链上均按层级编译（MSVC `/arch:...`、GCC/Clang `-m...`）；非 x86 平台可选 SIMDe 模拟 SSE4.2+FMA3 类，否则回退为标量实现
 
 后端/运行时依赖会随构建选项变化（CUDA/Vulkan/CPU、ONNX Runtime、ICU 等）。
 

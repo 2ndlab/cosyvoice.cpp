@@ -95,7 +95,7 @@ additional capabilities are needed beyond a standard C++20 toolchain:
 git clone https://github.com/simd-everywhere/simde.git --depth=1
 ```
 
-**CMake (≥ 3.24) and Ninja (recommended)**
+**CMake (≥ 3.28) and Ninja (recommended)**
 
 Make sure `cmake` and `ninja` are available. For `cosyvoice-server` on Android:
 - The NDK's C compiler must support C23 `#embed` — use **NDK r28+** (Clang 19+).

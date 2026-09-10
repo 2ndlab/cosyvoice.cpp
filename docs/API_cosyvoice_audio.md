@@ -396,13 +396,10 @@ Encodes mono float PCM data and writes it to an audio file.
 
 ### Remarks
 
-The encoder format is inferred from the output file extension:
+Format inference from the output file extension depends on the audio backend:
 
-- `.wav` -> WAV
-- `.flac` -> FLAC
-- `.mp3` -> MP3
-
-If the extension is missing or unsupported, the function falls back to WAV and emits a warning log message (`"Unknown audio file extension, defaulting to WAV format"`).
+- **MINIAUDIO (default)**: always writes WAV. Any extension other than `.wav` (or a missing extension) logs a warning (`"Unknown audio file extension, defaulting to WAV format"`) and still writes WAV.
+- **FFMPEG**: `.wav` / `.mp3` / `.aac` / `.flac` / `.m4a` / `.opus` are inferred from the extension (the actually usable subset depends on the encoders in the linked FFmpeg runtime). An unrecognized extension logs a warning (`"Unrecognized file extension (...), defaulting to WAV format."`) and falls back to WAV.
 
 Extension matching is case-insensitive, so uppercase extensions (for example `.WAV`) are accepted.
 

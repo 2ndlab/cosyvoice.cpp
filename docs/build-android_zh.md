@@ -91,7 +91,7 @@ apt reinstall ocl-icd
 git clone https://github.com/simd-everywhere/simde.git --depth=1
 ```
 
-**CMake（≥ 3.24）和 Ninja（推荐）**
+**CMake（≥ 3.28）和 Ninja（推荐）**
 
 安装后确保 `cmake` 和 `ninja` 可用。在 Android 上编译 `cosyvoice-server` 时：
 - NDK 的 C 编译器必须支持 C23 `#embed`——使用 **NDK r28+**（Clang 19+）。

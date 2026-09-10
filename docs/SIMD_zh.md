@@ -63,8 +63,10 @@ AVX10 的 preset 只带 `fma3` + 自己的位。因此共享代码路径在两�
   `XCR0 & 0xE6 == 0xE6`（opmask + ZMM 状态）。尽管 512 分支自身不发
   128/256 位 EVEX，VL 仍是必需的——编译器自己的溢出代码会用
   EVEX xmm16+/ymm16+。只有部分子集的型号（Knights Landing：仅 F）落到 AVX2。
-- **AVX10** — CPUID leaf 0x24H（独立于 legacy 位，因为纯 AVX10 型号不枚举
-  legacy 位）：`EAX[7:0]` = 版本（1 = AVX10.1，2 = AVX10.2），
+- **AVX10** — CPUID leaf 0x24H（独立于 leaf 7 的 legacy AVX2/AVX-512 枚举位，
+  因为纯 AVX10 型号不置位这些位；但仍在上方 leaf 1 的 OSXSAVE+AVX 与
+  XGETBV 门槛之后——任何 AVX10 型号都满足该门槛）：
+  `EAX[7:0]` = 版本（1 = AVX10.1，2 = AVX10.2），
   `EBX bit16` = 256 位，`EBX bit17` = 512 位。256 类还要求
   `XCR0 & 0x26 == 0x26`（opmask）；512 类要完整 `0xE6`。版本 ≥ 1 即点亮
   两类；10.2 与 10.1 点亮相同的位。
@@ -114,7 +116,7 @@ k 掩码版 log/sincos 助手（`_mm256_cmp_ps_mask`、`_mm256_cmp_epi32_mask`�
 | CMake 缓存项 | 编译定义 | 门控对象 |
 |---|---|---|
 | `COSYVOICE_NO_SIMD` | `COSYVOICE_NO_SIMD` | 关闭全部 SIMD（非 x86 且无 SIMDe 时自动开启） |
-| `COSYVOICE_HAS_SCALAR` | `COSYVOICE_HAS_SCALAR` | 标量层对象；x86 上一律构建（分派兜底）——非 x86 + SIMDe 时跳过（永远不会被分派到） |
+| `COSYVOICE_HAS_SCALAR` | `COSYVOICE_HAS_SCALAR` | 标量**分派**回退分支；x86 上标量层对象本身无条件构建，与本选项无关——非 x86 + SIMDe 时跳过（永远不会被分派到） |
 | `COSYVOICE_HAS_SSE42` / `_AVX` / `_AVX2` / `_AVX512` | 同名 | 各 legacy 层级 |
 | `COSYVOICE_HAS_AVX10_1` | `COSYVOICE_HAS_AVX10_1_256` | 仅 AVX10-256 层（外加编译器标志探针） |
 
