@@ -41,6 +41,7 @@ struct cosyvoice_model_context
     // LLM Operations
     virtual bool llm_prefill(ggml_type type, const void* data, uint32_t seq_len) = 0; ///< Prefill the LLM with a sequence of embeddings.
     virtual bool llm_decode(ggml_type type, const void* data) = 0; ///< Decode one step from an embedding vector.
+    virtual bool llm_prefill_logits(ggml_type type, const void* data, uint32_t seq_len) = 0; ///< Prefill the LLM with a sequence of embeddings and compute the logits of the next token.
     virtual void llm_prepare_probs(bool allow_stop_tokens) = 0; ///< Prepare probabilities for sampling and optionally mask stop tokens.
 
     // Embedding Access

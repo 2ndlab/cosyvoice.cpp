@@ -207,6 +207,19 @@ COSYVOICE_API bool cosyvoice_llm_decode(
 );
 
 /**
+ * @brief Prefill the LLM module with the given token embeddings and compute the logits of the next token.
+ * @note Logits are stored internally. Use the sampler API to sample the next token.
+ * @note Unlike @ref cosyvoice_llm_prefill followed by @ref cosyvoice_llm_decode, this evaluates
+ *       the attention output of only the last prefill position in a single graph computation.
+ */
+COSYVOICE_API bool cosyvoice_llm_prefill_logits(
+    cosyvoice_context_t ctx,
+    enum ggml_type      type,
+    const void*         data,
+    uint32_t            n_tokens
+);
+
+/**
  * @brief Prepare the current LLM probabilities for sampling.
  * @param allow_stop_tokens If false, stop tokens are masked to zero probability.
  */

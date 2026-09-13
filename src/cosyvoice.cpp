@@ -292,6 +292,16 @@ bool cosyvoice_llm_decode(cosyvoice_context_t ctx, ggml_type type, const void* d
     return ctx->llm_decode(type, data);
 }
 
+bool cosyvoice_llm_prefill_logits(
+    cosyvoice_context_t ctx,
+    ggml_type type,
+    const void* data,
+    uint32_t n_tokens
+)
+{
+    return ctx->llm_prefill_logits(type, data, n_tokens);
+}
+
 void cosyvoice_llm_prepare_probs(cosyvoice_context_t ctx, bool allow_stop_tokens)
 {
     ctx->llm_prepare_probs(allow_stop_tokens);
