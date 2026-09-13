@@ -201,11 +201,9 @@ bool cosyvoice_model_3::llm_prefill(
     auto& llm_probs = worker->llm_probs;
     if (gf && llm_input && !llm_probs
         && llm_input->type == type && n_tokens == llm_input->ne[1]
-        && kv_cache->can_reuse())
+        && kv_cache->can_reuse() && !causal_mask)
     {
         ggml_backend_tensor_set_async(worker->backend.get(), llm_input, data, 0, ggml_nbytes(llm_input));
-        if (causal_mask)
-            build_causal_mask(reinterpret_cast<ggml_fp16_t*>(causal_mask->data), n_tokens, total_len);
         kv_cache->shift_kv_node_pos(n_tokens);
     }
     else
