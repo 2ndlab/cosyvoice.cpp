@@ -49,14 +49,14 @@ bool cosyvoice_model_3::llm_job_ext(const int* text, uint32_t text_len, cosyvoic
 
             auto prefill_embedding = [&](const char* data, int token_id, uint32_t row_size, ggml_type type)
             {
+                memcpy(batch_buffer.get() + offset++ * row_size, data + token_id * row_size, row_size);
+
                 if (offset == n_batch)
                 {
                     if (!llm_prefill(type, batch_buffer.get(), n_batch))
                         throw std::runtime_error("Failed to prefill LLM KV cache.\n");
                     offset = 0;
                 }
-
-                memcpy(batch_buffer.get() + offset++ * row_size, data + token_id * row_size, row_size);
             };
 
             if (llm_get_kv_cache_len() == 0)
@@ -77,7 +77,6 @@ bool cosyvoice_model_3::llm_job_ext(const int* text, uint32_t text_len, cosyvoic
                 llm_set_kv_cache_len(1);
                 goto prefill_prompt;
             }
-                ;
 
             for (uint32_t i = 0; i != text_len; ++i)
                 prefill_embedding(token_emb, text[i], token_row_size, token_type);
@@ -110,14 +109,20 @@ bool cosyvoice_model_3::llm_job_ext(const int* text, uint32_t text_len, cosyvoic
                 cur = speech_emb + acc_tokens[end] * speech_row_size;
             }
 
-            if (offset != 0 && !llm_prefill(speech_type, batch_buffer.get(), offset))
-                throw std::runtime_error("Failed to prefill LLM KV cache.\n");
+            // Prefill the remaining tokens together with `cur` (the input of
+            // the first decode step) in a single fused pass that also computes
+            // the logits of the next token.
+            memcpy(batch_buffer.get() + offset * speech_row_size, cur, speech_row_size);
+            if (!llm_prefill_logits(speech_type, batch_buffer.get(), offset + 1))
+                throw std::runtime_error("Failed to prefill LLM KV cache and compute logits.\n");
         }
         else
         {
             // Continue from existing KV cache — get last accepted token's embedding
             const auto last_token_id = llm_get_accepted_tokens()[llm_get_n_accepted_tokens() - 1];
             cur = speech_emb + last_token_id * speech_row_size;
+            if (!llm_decode(speech_type, cur))
+                throw std::runtime_error("Failed to decode LLM output.\n");
         }
 
         // First call: min/max from text input
@@ -132,20 +137,8 @@ bool cosyvoice_model_3::llm_job_ext(const int* text, uint32_t text_len, cosyvoic
         constexpr uint32_t max_silent_token_num = 5;
         const auto& silent_tokens = cv3_shared->silent_tokens;
 
-        for (uint32_t n = llm_get_n_accepted_tokens(); n != limit; ++n)
+        for (uint32_t n = llm_get_n_accepted_tokens();; ++n)
         {
-            if (is_stop_requested())
-            {
-                worker->llm_input = nullptr;
-                cosyvoice_call_ggml_log_callback(GGML_LOG_LEVEL_INFO, "LLM generation stopped by user.\n");
-                if (params.builtin_sampler_rng_policy == COSYVOICE_BUILTIN_SAMPLER_RNG_POLICY_RESET_PER_SESSION)
-                    reset_builtin_sampler_rng();
-                return false;
-            }
-
-            if (!llm_decode(speech_type, cur))
-                throw std::runtime_error("Failed to decode LLM output.\n");
-
             llm_prepare_probs(n > min_len);
             const auto token_id = llm_sample_token();
             if (token_id == -1)
@@ -174,7 +167,22 @@ bool cosyvoice_model_3::llm_job_ext(const int* text, uint32_t text_len, cosyvoic
                 cur_silent_token_num = 0;
 
             llm_accept_token(token_id);
+
+            if (is_stop_requested())
+            {
+                worker->llm_input = nullptr;
+                cosyvoice_call_ggml_log_callback(GGML_LOG_LEVEL_INFO, "LLM generation stopped by user.\n");
+                if (params.builtin_sampler_rng_policy == COSYVOICE_BUILTIN_SAMPLER_RNG_POLICY_RESET_PER_SESSION)
+                    reset_builtin_sampler_rng();
+                return false;
+            }
+
+            if (n > limit)
+                break;
+
             cur = speech_emb + token_id * speech_row_size;
+            if (!llm_decode(speech_type, cur))
+                throw std::runtime_error("Failed to decode LLM output.\n");
         }
     }
     catch (const std::exception& e)

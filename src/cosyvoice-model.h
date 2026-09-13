@@ -182,6 +182,7 @@ struct cosyvoice_model_3 : cosyvoice_model
     bool llm_decode(ggml_type type, const void* data);
     void llm_prepare_probs(bool allow_stop_tokens);
     bool llm_prefill(ggml_type type, const void* data, uint32_t seq_len);
+    bool llm_prefill_logits(ggml_type type, const void* data, uint32_t seq_len);
 
     bool llm_is_stop_token(int token_id);
 
