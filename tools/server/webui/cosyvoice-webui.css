@@ -700,6 +700,9 @@ details .params > * {
     flex: 1;
     min-width: 120px;
 }
+details .params label {
+    white-space: nowrap;
+}
 
 .config-section-title {
     font-size: 11px;

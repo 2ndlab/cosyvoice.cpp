@@ -35,6 +35,7 @@ const ADV_PARAM_IDS = [
     'model-dit-actual-fixed-slots','model-dit-actual-offloadable-slots',
     'model-diffusion-steps',
     'model-llm-flash-attn','model-flow-flash-attn',
+    'model-strict-seed',
     'tts-stream','tts-chunk-tokens'
 ];
 
@@ -146,6 +147,8 @@ function initEls() {
         'model-dit-kv-k', 'model-dit-kv-v', 'model-dit-fixed-slots', 'model-dit-offloadable-slots', 'model-dit-cache-length',
         'model-dit-actual-fixed-slots', 'model-dit-actual-offloadable-slots',
         'model-diffusion-steps',
+        'model-llm-flash-attn', 'model-flow-flash-attn',
+        'model-strict-seed',
         'btn-reset-model-config',
         'btn-load-model', 'btn-unload-model',
         'model-load-area', 'model-loaded-area', 'model-loaded-info',
@@ -350,6 +353,7 @@ function updateModelUI() {
         const mll = statusData.max_llm_len || '?';
         const llmFattn = statusData.llm_use_flash_attn !== undefined ? (statusData.llm_use_flash_attn ? 'yes' : 'no') : '?';
         const flowFattn = statusData.flow_use_flash_attn !== undefined ? (statusData.flow_use_flash_attn ? 'yes' : 'no') : '?';
+        const strictSeed = statusData.strict_seed !== undefined ? (statusData.strict_seed ? 'yes' : 'no') : '?';
         const steps = statusData.diffusion_steps != null ? statusData.diffusion_steps : '?';
         els['model-loaded-info'].innerHTML = '<b>' + escapeHtml(arch) + '</b><br>'
             + 'KV Cache: K=' + kv_k + ', V=' + kv_v + '<br>'
@@ -357,6 +361,7 @@ function updateModelUI() {
             + 'Max LLM Length: ' + mll + '<br>'
             + 'LLM Flash Attn: ' + llmFattn + '<br>'
             + 'Flow Flash Attn: ' + flowFattn + '<br>'
+            + 'Strict Seed: ' + strictSeed + '<br>'
             + 'Sample Rate: ' + (statusData.sample_rate || '?') + ' Hz'
             + '<br>Diffusion Steps: ' + steps;
     }
@@ -503,6 +508,7 @@ function initModelLoad() {
 
             if (els['model-llm-flash-attn']) body.llm_use_flash_attn = els['model-llm-flash-attn'].checked;
             if (els['model-flow-flash-attn']) body.flow_use_flash_attn = els['model-flow-flash-attn'].checked;
+            if (els['model-strict-seed']) body.strict_seed_mode = els['model-strict-seed'].checked;
 
             const dkt = els['model-dit-kv-k'].value;
             const dvt = els['model-dit-kv-v'].value;
@@ -1866,6 +1872,9 @@ async function fetchDefaults() {
         // Chunk tokens (0 = model default)
         if (d.chunk_tokens !== undefined && els['tts-chunk-tokens'])
             els['tts-chunk-tokens'].value = d.chunk_tokens;
+
+        if (d.strict_seed_mode !== undefined && els['model-strict-seed'])
+            els['model-strict-seed'].checked = !!d.strict_seed_mode;
 
         if (d.temperature !== undefined) els['tts-temp'].value = r(d.temperature, 6);
         if (d.top_k !== undefined) els['tts-topk'].value = d.top_k;

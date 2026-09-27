@@ -794,6 +794,7 @@ int cosyvoice_server_backend_run(server_runtime& runtime)
         print_info_log(runtime.log_level, "  seed_strategy      : server default=%u, request override allowed\n", runtime.seed);
     else
         print_info_log(runtime.log_level, "  seed_strategy      : random per request, request override allowed\n");
+    print_info_log(runtime.log_level, "  strict_seed        : %s\n", runtime.strict_seed_mode ? "enabled" : "disabled");
 #ifndef COSYVOICE_NO_ICU
     print_info_log(runtime.log_level, "  text_normalization : %s\n", runtime.text_normalization_enabled ? "enabled" : "disabled");
 #else

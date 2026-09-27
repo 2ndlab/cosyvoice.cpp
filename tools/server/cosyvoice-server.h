@@ -118,6 +118,7 @@ struct server_runtime
     bool has_seed = false;
     bool webui_enabled = false;
     uint32_t seed = 0;
+    bool strict_seed_mode = true;
     uint32_t concurrency = 1;
     cosyvoice_inference_buffer_policy_t inference_buffer_policy = COSYVOICE_INFERENCE_BUFFER_POLICY_DEDICATED;
     bool has_llm_kv_cache_override = false;

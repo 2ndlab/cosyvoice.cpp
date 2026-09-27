@@ -48,6 +48,7 @@ struct server_options
 
     bool has_seed = false;
     uint32_t seed = 0;
+    bool strict_seed = true;
 #ifdef COSYVOICE_SIMD_CONTROL_SUPPORTED
     bool has_simd_level = false;
     cosyvoice_simd_level_t simd_level = COSYVOICE_SIMD_LEVEL_AUTO;
@@ -142,6 +143,9 @@ static void print_usage(const char* argv0)
     printf("                                              KV cache type. Single type (e.g. q8_0) uses the same format for K and V.\n");
     printf("                                              Default: k=q8_0,v=q4_0,fallback=q8_0.\n");
     printf("  --seed <value>                              Default random seed for built-in sampler.\n");
+    printf("  --strict-seed <0|1>                         Strictly guarantee identical audio for the same sampler\n");
+    printf("                                              seed. Disable for a slightly faster prefill pass.\n");
+    printf("                                              Default: 1.\n");
     printf("  --dit-kv-cache-type <f32|f16|q8_0|q5_1|q5_0|q4_1|q4_0|k=<type>,v=<type>[,fallback=<type>]>\n");
     printf("                                              DiT KV cache type. Default: k=q8_0,v=q4_0,fallback=q8_0.\n");
     printf("  --dit-kv-fixed-slots <value>                DiT KV fixed slots (0 = auto).\n");
@@ -281,6 +285,7 @@ static bool init_model_context(const server_options& options, ggml_backend_t bac
     context_params_v4.diffusion_steps = options.diffusion_steps;
     context_params_v4.dit_kv_actual_fixed_slots = options.dit_kv_actual_fixed_slots;
     context_params_v4.dit_kv_actual_offloadable_slots = options.dit_kv_actual_offloadable_slots;
+    context_params_v4.strict_seed_mode = options.strict_seed;
     if (options.has_seed)
         context_params.seed = options.seed;
     context_params.n_workers = options.concurrency;
@@ -415,6 +420,7 @@ static bool build_runtime(const server_options& options, server_runtime* runtime
     runtime->port = options.port;
     runtime->has_seed = options.has_seed;
     runtime->seed = options.seed;
+    runtime->strict_seed_mode = options.strict_seed;
     runtime->concurrency = options.concurrency;
     runtime->inference_buffer_policy = options.inference_buffer_policy;
 #ifndef COSYVOICE_NO_ICU
@@ -502,6 +508,7 @@ static bool webui_build_runtime(const server_options& options, server_runtime* r
     runtime->port = options.port;
     runtime->has_seed = options.has_seed;
     runtime->seed = options.seed;
+    runtime->strict_seed_mode = options.strict_seed;
     runtime->concurrency = 1;
     runtime->inference_buffer_policy = options.inference_buffer_policy;
 #ifndef COSYVOICE_NO_ICU
@@ -802,6 +809,19 @@ int tool_entry(int argc, char** argv)
                 }
                 options.seed = seed;
                 options.has_seed = true;
+            }
+            else if (str_casecmp(arg, "--strict-seed") == 0)
+            {
+                const auto v = to_lower(get_arg_value());
+                if (v == "1" || v == "yes" || v == "true" || v == "on")
+                    options.strict_seed = true;
+                else if (v == "0" || v == "no" || v == "false" || v == "off")
+                    options.strict_seed = false;
+                else
+                {
+                    fprintf(stderr, "Error: invalid --strict-seed value \"%s\". Use 0/1, yes/no, true/false, on/off.\n", v.c_str());
+                    return 1;
+                }
             }
             else if (str_casecmp(arg, "--temperature") == 0)
             {

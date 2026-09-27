@@ -427,6 +427,7 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
         else
             json += "\"" + runtime.served_model_name + "\"";
         json += ",\"sample_rate\":" + std::to_string(runtime.sample_rate);
+        json += ",\"strict_seed\":" + std::string(runtime.strict_seed_mode ? "true" : "false");
         if (!runtime.model_slots.empty())
         {
             cosyvoice_context_params_t actual_params;
@@ -1203,6 +1204,10 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
         if (runtime.has_seed)
             context_params.seed = runtime.seed;
         context_params.n_workers = 1;
+        bool strict_seed_mode = runtime.strict_seed_mode;
+        if (body.contains("strict_seed_mode"))
+            strict_seed_mode = body["strict_seed_mode"].get<bool>();
+        context_params_v4.strict_seed_mode = strict_seed_mode;
 
         // Apply optional advanced config from request
         if (body.contains("llm_kv_cache_type"))
@@ -1329,6 +1334,7 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
             runtime.dit_kv_actual_fixed_slots = context_params_v4.dit_kv_actual_fixed_slots;
             runtime.dit_kv_actual_offloadable_slots = context_params_v4.dit_kv_actual_offloadable_slots;
             runtime.diffusion_steps          = context_params_v4.diffusion_steps;
+            runtime.strict_seed_mode         = strict_seed_mode;
         }
 
         // Apply chunk_tokens if specified
@@ -1428,6 +1434,7 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
         d["default_buffer_policy"] = "dedicated";
         d["default_backend"]       = "auto";
         d["default_n_threads"]     = 0;
+        d["strict_seed_mode"]      = runtime.strict_seed_mode;
 
         // Default DiT KV types (overridden below when model is loaded)
         d["default_dit_k_cache_type"]  = "q8_0";
