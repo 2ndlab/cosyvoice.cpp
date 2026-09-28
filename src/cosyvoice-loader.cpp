@@ -828,12 +828,6 @@ void cosyvoice_model_3::load(gguf_loader& loader)
     auto buffer_base = reinterpret_cast<char*>(ggml_backend_buffer_get_base(shared->buffer.get()));
 
     shared->backend_uma = backend_looks_uma(backend, shared->buffer.get());
-    if (shared->params.inference_buffer_policy == COSYVOICE_INFERENCE_BUFFER_POLICY_BALANCED
-        && shared->backend_uma)
-    {
-        shared->params.inference_buffer_policy = COSYVOICE_INFERENCE_BUFFER_POLICY_DEDICATED;
-        cosyvoice_call_ggml_log_callback(GGML_LOG_LEVEL_INFO, "Detected UMA-like backend memory; switching balanced inference buffers to dedicated mode.\n");
-    }
 
     shared->ctx.reset(ggml_init(params));
 
