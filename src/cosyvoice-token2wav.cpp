@@ -192,7 +192,7 @@ struct dit_sched_config
                 graph_config[i].cut_len = i == n - 1 && offset == 0 ? cut_len : 0;
                 if (i == n_no_cache_steps - 1 && offset != 0)
                     graph_config[i].cut_len = offset;
-                graph_config[i].slice = offset != 0 && i == n_no_cache_steps;
+                graph_config[i].slice = offset != 0 && n_no_cache_steps != 0 && i == n_no_cache_steps;
                 graph_config[i].slide = kv_slidable && graph_config[i].cache_kv && i != n - 1
                     && phys_slot_of(i + 1) == graph_config[i].phys_slot + 1;
             }
@@ -404,6 +404,7 @@ bool cosyvoice_model_3::token2wav_ext(const int* token_ids, uint32_t n_tokens, f
         if (config[step].slice)
         {
             const auto cut_len = config[step - 1].cut_len;
+            GGML_ASSERT(cut_len >= 0 && cut_len <= ditctx.cond_in->ne[1] && cut_len <= ditctx.mu_in->ne[1]);
             reinterpret_cast<char*&>(ditctx.cond_in->data) += static_cast<size_t>(ditctx.cond_in->nb[1]) * cut_len;
             ditctx.cond_in->ne[1] -= cut_len;
             reinterpret_cast<char*&>(ditctx.mu_in->data) += static_cast<size_t>(ditctx.mu_in->nb[1]) * cut_len;
