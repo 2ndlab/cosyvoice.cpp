@@ -78,7 +78,6 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($cores)) { $cores = 4 }
           
           $buildDir = "build"
-          $installDir = "install_dir"
           $sharedDeps = "$PWD\shared_deps"
 
           foreach ($f in $frontends) {
@@ -106,6 +105,16 @@ jobs:
                   "-DCMAKE_C_COMPILER=cl",
                   "-DCMAKE_CXX_COMPILER=cl"
                 )
+                
+                # Match llama.cpp's Windows release layout: backends become loadable
+                # modules (ggml-cpu-<isa>.dll) instead of a link-time ggml-cpu.dll,
+                # so the artifact can reuse the GGML libraries a user drops in from
+                # a llama.cpp release. GGML_NATIVE=OFF is required by
+                # GGML_BACKEND_DL.
+                # GGML_CPU_ALL_VARIANTS is deliberately NOT set: it would compile
+                # ggml-cpu once per ISA (9 on MSVC x64), and every one of those
+                # modules is deleted from the artifact again.
+                $cmakeArgs += @("-DGGML_BACKEND_DL=ON", "-DGGML_NATIVE=OFF")
                 
                 if ($f -eq "OFF") { $cmakeArgs += "-DCOSYVOICE_NO_FRONTEND=ON" } else { $cmakeArgs += "-DCOSYVOICE_NO_FRONTEND=OFF" }
                 if ($i -eq "OFF") { $cmakeArgs += "-DCOSYVOICE_NO_ICU=ON" } else { $cmakeArgs += "-DCOSYVOICE_NO_ICU=OFF" }
@@ -164,7 +173,6 @@ jobs:
           CORES=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
           
           BUILD_DIR="build"
-          INSTALL_DIR="install_dir"
           SHARED_DEPS="$PWD/shared_deps"
 
           mkdir -p "${SHARED_DEPS}/onnxruntime"
@@ -196,6 +204,27 @@ jobs:
                 if [ -n "$SDKROOT" ]; then CMAKE_ARGS+=("-DCMAKE_OSX_SYSROOT=${SDKROOT}"); fi
                 if [ -n "$ICU_ROOT_PATH" ]; then CMAKE_ARGS+=("-DICU_ROOT=$ICU_ROOT_PATH"); fi
                 
+                # Release artifacts are a FLAT directory (build/bin and build/lib are
+                # merged), so the runtime path has to resolve there:
+                #  - Linux: $ORIGIN is the only entry that resolves; $ORIGIN/../lib
+                #    does not exist. Single-quoted so the shell does not expand it.
+                #  - macOS: dyld has no current-directory fallback for @rpath, and a
+                #    literal CMAKE_BUILD_RPATH entry need not survive CMake, so hand
+                #    the flag to the linker directly.
+                #
+                # Only Linux follows llama.cpp's dlopen backend layout (backends as
+                # loadable libggml-cpu-<isa>.so modules); macOS keeps llama.cpp's
+                # classic versioned dylibs (libggml-cpu.0.dylib,
+                # libggml-metal.0.dylib). GGML_CPU_ALL_VARIANTS is deliberately NOT
+                # set: it would compile ggml-cpu once per ISA and every one of those
+                # modules is deleted from the artifact again.
+                if [ "${{ matrix.os_name }}" = "linux" ]; then
+                  CMAKE_ARGS+=("-DGGML_BACKEND_DL=ON" "-DGGML_NATIVE=OFF" '-DCMAKE_BUILD_RPATH=$ORIGIN')
+                else
+                  CMAKE_ARGS+=("-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath,@loader_path"
+                               "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-rpath,@loader_path")
+                fi
+                
                 if [ "$f" == "OFF" ]; then CMAKE_ARGS+=("-DCOSYVOICE_NO_FRONTEND=ON"); else CMAKE_ARGS+=("-DCOSYVOICE_NO_FRONTEND=OFF"); fi
                 if [ "$i" == "OFF" ]; then CMAKE_ARGS+=("-DCOSYVOICE_NO_ICU=ON"); else CMAKE_ARGS+=("-DCOSYVOICE_NO_ICU=OFF"); fi
                 if [ "$a" == "NONE" ]; then 
@@ -213,7 +242,7 @@ jobs:
                 if [ -d "$BUILD_DIR/bin/Release" ]; then BIN_DIR="$BUILD_DIR/bin/Release"; else BIN_DIR="$BUILD_DIR/bin"; fi
                 if [ -d "$BUILD_DIR/lib/Release" ]; then LIB_DIR="$BUILD_DIR/lib/Release"; else LIB_DIR="$BUILD_DIR/lib"; fi
                 
-                # -a preserves symlinks (e.g. GGML's versioned dylib chain)
+                # -a preserves symlinks (e.g. ONNX Runtime's versioned dylib chain)
                 cp -a "$BIN_DIR"/* "$DIST_DIR"/ 2>/dev/null || true
                 cp -a "$LIB_DIR"/* "$DIST_DIR"/ 2>/dev/null || true
                 
@@ -238,17 +267,16 @@ jobs:
                 find "$DIST_DIR" -name "*.lib" -delete 2>/dev/null || true
                 find "$DIST_DIR" -name "*.exp" -delete 2>/dev/null || true
                 find "$DIST_DIR" -name "*.pdb" -delete 2>/dev/null || true
-                # macOS bundles the patched GGML dylibs (Metal PAD patch); all
-                # other platforms let users grab stock GGML from llama.cpp.
-                if [ "${{ matrix.os }}" != "macos-26" ]; then
-                  find "$DIST_DIR" -name "*ggml*" -delete 2>/dev/null || true
-                fi
+                # GGML is never bundled on any platform — users drop the
+                # libggml* shared libraries from a matching llama.cpp release
+                # into the same directory as the executables.
+                find "$DIST_DIR" -name "*ggml*" -delete 2>/dev/null || true
                 find "$DIST_DIR" -name "*icu*" -delete 2>/dev/null || true
                 find "$DIST_DIR" -name "*avcodec*" -delete 2>/dev/null || true
                 find "$DIST_DIR" -name "*avformat*" -delete 2>/dev/null || true
                 find "$DIST_DIR" -name "*avutil*" -delete 2>/dev/null || true
                 find "$DIST_DIR" -name "*swresample*" -delete 2>/dev/null || true
-                
+
                 tar -czf "${ARTIFACT_NAME}.tgz" -C "$DIST_DIR" .
                 
               done
