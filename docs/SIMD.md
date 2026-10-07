@@ -9,7 +9,7 @@ dispatch rules, the AVX10 policy, and the build-time inclusion knobs.
 | File | Role |
 |---|---|
 | `src/simd-dispatch.h` | `simd_caps` struct, presets, `simd_dispatch<Kernel>` — no intrinsic types, safe for caller TUs |
-| `src/simd_detect.cpp` | CPUID/XCR0 feature detection → `g_simd_caps` (x86-64 only) |
+| `src/simd_detect.cpp` | CPUID/XCR0 feature detection → `g_simd_hw_caps` (immutable) + `g_simd_caps` (mutable tier selection, initialized to the same value) + the `COSYVOICE_SIMD_LEVEL` env-var initializer — all in one TU, so init order is definitional (x86-64 only) |
 | `src/simd-kernels.h` | Kernel class declarations + `simd_vec<C, N>` vector typedefs + extern-template declarations |
 | `src/simd-kernels-impl.h` | All kernel bodies + support helpers, templated on `simd_caps C` — included **only** by tier TUs |
 | `src/simd-math.h` | Vector log/sincos helpers (128/256/512) — included **only** by tier TUs |
@@ -78,13 +78,60 @@ configurations like "AVX10-256 enabled, SSE4.2/AVX/AVX2 disabled".
   2 = AVX10.2), `EBX bit16` = 256-bit, `EBX bit17` = 512-bit.
   256 class also requires `XCR0 & 0x26 == 0x26` (opmask); 512 the full
   `0xE6`. Version ≥ 1 gates both classes; 10.2 lights the same bits as 10.1.
-- The result is cached in `g_simd_caps` (one-time static init); Debug builds
-  log the detected set at startup.
+- The detection result is cached in the immutable `g_simd_hw_caps` (one-time
+  static init); the mutable `g_simd_caps` (what the dispatch reads) starts as
+  the same value. Debug builds log the detected set at startup.
+
+## Runtime control API
+
+- x86-64 builds expose `cosyvoice_get_simd_info()` / `cosyvoice_get_simd_level()`
+  / `cosyvoice_set_simd_level()` in `cosyvoice.h` (feature-test macro
+  `COSYVOICE_SIMD_CONTROL_SUPPORTED`). The level caps the **dispatch tier**,
+  not the hardware: the setter computes
+  `simd_caps_for_level(g_simd_hw_caps, level)` (in `simd-dispatch.h`) once and
+  stores the result into the mutable `g_simd_caps`; the dispatch is then just
+  one relaxed atomic load of that value plus the unchanged
+  most-capable-first chain, so e.g. `COSYVOICE_SIMD_LEVEL_AVX2` on an
+  AVX-512 machine selects the AVX2 tier and `COSYVOICE_SIMD_LEVEL_SCALAR`
+  forces the scalar tier. `AUTO` (default) restores the uncapped hardware
+  truth.
+- The cap maps one class per level: SSE42, AVX, AVX2, AVX10.1-256, AVX-512.
+  The AVX-512 level also allows AVX10-512 (same tier); the AVX10-256 level
+  only removes the two 512-bit enumeration sources, so AVX10-capable parts
+  keep the 256 tier and everyone else keeps AVX2 and below. Requesting a
+  level above the hardware or a tier this build does not include is harmless
+  (dispatch clamps to the best available tier).
+- Semantics: process-global, atomic. The cap is computed once per level
+  change; the dispatch hot path is a single relaxed atomic load of
+  `g_simd_caps` (a C++17 `inline` atomic shared by every caller TU),
+  negligible against O(n) kernels. `g_simd_level` is read-back-only
+  metadata for `cosyvoice_get_simd_level()` / `cosyvoice_simd_info_t.level`
+  and never feeds the dispatch. A change affects subsequent kernel calls;
+  kernels already in flight keep the tier they resolved at entry.
+- Environment variable: `COSYVOICE_SIMD_LEVEL` is read **once at library
+  load** (static initialization in `simd_detect.cpp`, same TU as the
+  detection result so init order is definitional) by every consumer. Values
+  (case-insensitive): `auto`, `scalar` (alias `none`), `sse42` (alias
+  `sse4.2`), `avx`, `avx2`, `avx10-256` (aliases `avx10_256`, `avx10.1-256`,
+  `avx10_1_256`), `avx512` (alias `avx-512`). Invalid values are silently
+  ignored. Later environment changes have no effect. Precedence: an explicit
+  `cosyvoice_set_simd_level()` call (e.g. `--simd-level` in the CLI/server)
+  > the env var > `AUTO`.
+- Availability: the API symbols exist on x86-64 always, including
+  `COSYVOICE_NO_SIMD` builds (there `supported`/`current` report 0,
+  `scalar_only=true`, and only `AUTO`/`SCALAR` are accepted). Non-x86
+  (ARM64/SIMDe) builds export nothing — the tier is fixed at compile time —
+  and the header feature macro is undefined; guard calls with it.
+- The numeric level values are public ABI: the internal `simd_level` enum in
+  `simd-dispatch.h` must stay identical to `cosyvoice_simd_level_t`
+  (a `static_assert` in `cosyvoice-simd.cpp` freezes every value).
 
 ## Dispatch
 
 `simd_dispatch<Kernel>(args...)` is one inline template shared by every
-caller TU. Order: **512 (legacy ∨ AVX10) → AVX10.1-256 → AVX2 → AVX →
+caller TU; on x86 it selects from the mutable `g_simd_caps` (the hardware
+truth capped by the runtime level, see above). Order:
+**512 (legacy ∨ AVX10) → AVX10.1-256 → AVX2 → AVX →
 SSE4.2 → scalar**. A class the build disabled is compiled out of the chain
 (`#if defined(COSYVOICE_HAS_*)` around each case), so the CPU always lands on
 the best *available* tier; if none remains the call throws. Under

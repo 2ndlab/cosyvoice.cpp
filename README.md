@@ -56,7 +56,7 @@ This project provides:
 | **KV Cache Quantization** | Reduce LLM memory usage via `--llm-kv-cache-type` (f32 / f16 / q8_0 / q5_1 / q4_0 / ...). Supports asymmetric quantization with separate K/V types (e.g. `k=q8_0,v=q4_0`). |
 | **Prompt Speech Reuse** | Pre-encode reference voice once, reuse across multiple synthesis runs — no ONNX overhead |
 | **Audio Backend Plugins** | Choose MINIAUDIO (default) or FFMPEG for multi-format encoding (WAV, MP3, AAC, FLAC, OPUS, M4A) |
-| **UMA Auto-Detection** | Automatically detects unified memory architecture and adjusts buffer policy for optimal throughput |
+| **UMA Detection** | Detects unified memory architecture and reports the result (e.g. `uma: yes/no`) for reference; does not alter buffer policy |
 | **Inference Buffer Policies** | `shared` / `balanced` / `dedicated` buffer modes to trade off memory vs. throughput |
 | **Text Splitting & Fade-in** | Smart text splitting for long inputs and configurable output fade-in postprocessing |
 | **Multiple Backends** | CPU, CUDA, Metal, Vulkan, SYCL (see [Backend Test Status](#backend-test-status)) |
@@ -67,11 +67,17 @@ This project provides:
 
 ### Pre-built Releases
 
-Binary releases are self-contained on **macOS (arm64)** — they bundle the patched GGML backend libraries (including the Metal PAD-patch build, which is not available from llama.cpp releases). For all other platforms:
+On every platform a release contains the `cosyvoice` binaries and the frontend/audio dependencies, but **never** GGML — that comes from a `llama.cpp` release:
 1. Download `cosyvoice-cli` or `cosyvoice-server` from this repository's [Releases page](https://github.com/Lourdle/cosyvoice.cpp/releases).
 2. Download a `llama.cpp` release that matches your hardware and OS.
-3. Place the `cosyvoice` executables into the same directory as the GGML backend shared libraries (`ggml.dll`, `ggml-cuda.dll`, etc.).
-4. Run from that directory.
+3. Copy **all** GGML libraries from that release into the same directory as the `cosyvoice` executables — `ggml*.dll` / `libggml*.so*` / `libggml*.dylib`, **including the CPU variant modules** (`ggml-cpu-<isa>.dll`, `libggml-cpu-<isa>.so`). Backends are discovered at runtime from the executable's directory, so omitting the variants leaves the binaries without a CPU backend.
+4. Run from that directory. On macOS copy the dylibs with `cp -a` (or extract the archive) so the versioned symlink chain stays intact — `libggml.dylib` is a symlink to `libggml.<version>.dylib`.
+
+Sanity check: run `cosyvoice-cli --list-backends`. It prints the backends that were actually loaded from that directory, and the names it prints are what `--backend` accepts. An empty list — or a list without your GPU backend — means the GGML libraries are in the wrong place or too old.
+
+> **System libraries:** the `icu=ON` and `audio=FFMPEG` variants link `libicuuc`/`libicui18n` and `libav*`/`libswresample` dynamically, and those are stripped from the archive — install them (or drop them in next to the executables). The `no_icu`, `miniaudio` and `no_audio` variants need nothing beyond GGML.
+
+> **GGML version requirement on macOS (Metal):** the Metal `GGML_OP_PAD` kernel must support beg (left) padding. Upstream added it in [ggml-org/llama.cpp#29561](https://github.com/ggml-org/llama.cpp/pull/29561) (commit `4364bf72`, 2026-09-28), so use a `llama.cpp` release built from that date or later. An older GGML reports `GGML_OP_PAD` as unsupported as soon as any beg padding is non-zero, and inference then aborts: the CPU fallback that covers the flow decoder's PAD nodes is not applied to every graph that contains a `PAD` — the LLM input embedding graph, for one, has none. No version constraint applies on Windows/Linux, though matching versions is still recommended.
 
 > **Known issue with pre-built GGML CUDA backend (Issue [#15](https://github.com/Lourdle/cosyvoice.cpp/issues/15)):** Some users have reported noise in generated audio when using pre-built GGML binaries from `llama.cpp` releases with the CUDA backend. Testing confirmed this issue with pre-compiled GGML CUDA builds, while self-compiled GGML from source did not exhibit the problem. If you encounter noise when using the CUDA backend with pre-built GGML, we recommend building both this project and GGML from source as a workaround. Refer to the [Build](#build) section for instructions. Alternatively, if building from source is not desirable, use the **Vulkan backend** — it works with the pre-built GGML releases out of the box.
 
@@ -205,20 +211,16 @@ cmake -B build -DGGML_VULKAN=ON
 
 Refer to the [GGML documentation](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md) for the full list of backend-specific options and recommended settings.
 
-**Metal backend (`GGML_METAL`) special handling**
-
-The Metal PAD beg-padding patch in `cmake/patches/ggml-metal-pad-beg.patch` is written against a specific ggml snapshot. If ggml is allowed to float to the latest master while Metal is enabled, line drift / kernel rewrites regularly break `git apply`, silently disabling Metal PAD support. To keep the patch valid, the build system pins the ggml commit — but only for Metal builds, so other backends keep using the latest ggml as before.
+**Metal backend (`GGML_METAL`)**
 
 - `GGML_METAL` defaults to **ON on Apple Silicon** (see ggml's own CMakeLists) and can be forced with `-DGGML_METAL=ON/OFF`.
-- **Metal builds** (default on Apple Silicon): GGML is pinned to commit `e91ded11bdcd78c42f9c8d3978ff6686eb4c1226` (v0.23.0; configurable via `GGML_PINNED_COMMIT` in `cmake/Dependencies.cmake`). CMake checks out that commit after cloning, warns (without failing) if an existing `vendor/ggml` checkout has drifted, and applies `cmake/patches/ggml-metal-pad-beg.patch` idempotently (skipped if already applied).
-- **Non-Metal builds**: unchanged behavior — the latest ggml master is shallow-cloned (`--depth=1`) and no patch is applied.
+- GGML itself needs no special handling for Metal: it is shallow-cloned at latest master (`--depth=1`) on every platform and no patch is applied. The Metal PAD beg-padding support that used to be patched in is upstream since [ggml-org/ggml#29561](https://github.com/ggml-org/ggml/pull/29561), which also added circular padding and support for permuted sources.
+- If an existing `vendor/ggml` predates that commit, CMake warns (without failing) because its Metal PAD kernel would abort inference — delete `vendor/ggml` and re-run CMake to pick up a fresh one.
 
 ```bash
 # Force Metal on/off (default: ON on Apple Silicon)
 cmake -B build -DGGML_METAL=ON
 ```
-
-To upgrade ggml for Metal builds, bump `GGML_PINNED_COMMIT` in `cmake/Dependencies.cmake` and regenerate the patch against the new tree (see the instructions in that file), then re-verify Metal synthesis end-to-end.
 
 **Dependency Path Options**
 
@@ -359,17 +361,19 @@ The CPU DSP path — FFT, mel/spectral kernels, log/sincos math — is hand-writ
 - Tiers: **scalar**, **SSE4.2 (+FMA3)**, **AVX**, **AVX2**, **AVX-512** (needs F+BW+DQ+VL and OS-enabled state), and **AVX10.1** — Panther Lake / Nova Lake and later are detected via CPUID leaf 0x24H; their 512-bit mode reuses the AVX-512 tier, only the 256-bit class has its own. Nothing to configure: a CPU that enumerates AVX10 gets it automatically.
 - On ARM64 (including Android) the SSE4.2+FMA3 tier can be emulated on NEON via [SIMDe](#simde-simd-everywhere); without SIMDe the build falls back to scalar-only.
 
-Build-time control (defaults: all tiers ON): `-DCOSYVOICE_NO_SIMD=OFF/ON` kills all SIMD; `-DCOSYVOICE_HAS_SCALAR`, `_SSE42`, `_AVX`, `_AVX2`, `_AVX512`, `_AVX10_1` drop individual tiers (disabling SSE4.2 cascades the higher legacy tiers off; the AVX10-256 tier needs a toolchain that knows its flags and is silently skipped otherwise). Debug builds print the detected capability set at startup. Tier layout, dispatch rules, and the AVX10 policy in depth: [docs/SIMD.md](docs/SIMD.md).
+Build-time control (defaults: all tiers ON): `-DCOSYVOICE_NO_SIMD=OFF/ON` kills all SIMD; `-DCOSYVOICE_HAS_SCALAR`, `_SSE42`, `_AVX`, `_AVX2`, `_AVX512`, `_AVX10_1` drop individual tiers (disabling SSE4.2 cascades the higher legacy tiers off; the AVX10-256 tier needs a toolchain that knows its flags and is silently skipped otherwise). Debug builds print the detected capability set at startup.
+
+Runtime control (x86-64 only): `cosyvoice_get_simd_info()` / `cosyvoice_set_simd_level()` in `cosyvoice.h` inspect the detected capabilities and cap the dispatch tier at runtime (e.g. force scalar for debugging, or disable AVX-512 to avoid frequency throttling) without a rebuild; tools accept `--simd-level`, and the `COSYVOICE_SIMD_LEVEL` environment variable (read once at library load) sets it for any consumer — see [docs/SIMD.md](docs/SIMD.md) — Runtime control API. Tier layout, dispatch rules, and the AVX10 policy in depth: [docs/SIMD.md](docs/SIMD.md).
 
 ## Streaming TTS & DiT KV Cache
 
 Streaming TTS delivers audio chunks incrementally via a callback function as they are synthesized, without waiting for the full utterance to complete. This enables real-time playback and lower perceived latency.
 
-Each chunk runs the DiT's 10 diffusion steps — without caching, every step of every new chunk recomputes attention over the whole sequence emitted so far. The **DiT KV cache** keeps the attention key/values of already-emitted positions **per diffusion step** (each step has its own cache slot), so a new chunk only computes its fresh positions: every cached position is processed once per step, then reused by all later chunks.
+Each chunk runs the DiT's diffusion steps (10 by default) — without caching, every step of every new chunk recomputes attention over the whole sequence emitted so far. The **DiT KV cache** keeps the attention key/values of already-emitted positions **per diffusion step** (each step has its own cache slot), so a new chunk only computes its fresh positions: every cached position is processed once per step, then reused by all later chunks.
 
 ### Slot Organization
 
-The DiT KV cache is organized into **slots**, where each slot holds the KV cache for one diffusion step. With the (fixed) 10 diffusion steps, at most 10 slots exist.
+The DiT KV cache is organized into **slots**, where each slot holds the KV cache for one diffusion step. With the default 10 diffusion steps, at most 10 slots exist (one per step).
 
 Slots fall into three categories:
 
@@ -379,7 +383,9 @@ Slots fall into three categories:
 | **Offloadable** | Offloaded to CPU when not in use | Saves device memory at the cost of transfer latency |
 | **Uncached** | Not stored at all | Full attention recomputation every step, no extra memory |
 
-**Step-to-slot mapping.** Steps are laid out in order — uncached first, then offloadable (all sharing one device scratch slot, each with its own CPU buffer), then fixed (one dedicated device slot each). A configuration with exactly one offloadable slot is normalized to fixed (`offloadable=1 → fixed+1`), and both counts are clamped so `fixed + offloadable` never exceeds the 10 diffusion steps. Total cached steps = `fixed + offloadable`; the rest recompute fully. Internal slot/scheduling layout: [docs/API_cosyvoice.md — DiT KV Cache Concept](docs/API_cosyvoice.md#dit-kv-cache-concept).
+**Step-to-slot mapping.** Steps are laid out in order — uncached first, then offloadable (all sharing one device scratch slot, each with its own CPU buffer), then fixed (one dedicated device slot each). A configuration with exactly one offloadable slot is normalized to fixed (`offloadable=1 → fixed+1`), and both counts are clamped so `fixed + offloadable` never exceeds the diffusion step count. Total cached steps = `fixed + offloadable`; the rest recompute fully. Internal slot/scheduling layout: [docs/API_cosyvoice.md — DiT KV Cache Concept](docs/API_cosyvoice.md#dit-kv-cache-concept).
+
+Adjacent steps can also **share** one physical cache via `--dit-kv-actual-fixed-slots` / `--dit-kv-actual-offloadable-slots`: the fixed and offloadable steps are each partitioned into that many groups, one device slot / CPU buffer per group, so the cache shrinks to `actual / nominal` of its size. Steps inside a group read the history last written by the group (a small approximation), and CPU round-trips happen once per group instead of per step.
 
 The cache is large, so the default is 0 slots (all 10 steps fully recomputed). When enabled and the sequence exceeds the configured cache length, some positions are discarded — inference continues normally but output quality may degrade. Offloadable slots transfer data between device and CPU, which may not improve speed and can be slower than full recomputation depending on bandwidth.
 
@@ -392,7 +398,11 @@ DiT KV cache parameters are configured via CLI/server `--dit-kv-*` flags (contex
 - `--dit-kv-cache-type`: Storage format for the cache — `f32`/`f16`/`q8_0`/`q5_1`/`q5_0`/`q4_1`/`q4_0`, or asymmetric with separate K and V formats (`k=<type>,v=<type>[,fallback=<type>]`, same style as `--llm-kv-cache-type`).
 - `--dit-kv-fixed-slots`: Number of device-resident slots. Default: `0`.
 - `--dit-kv-offloadable-slots`: Number of CPU-offloadable slots. Default: `0`.
+- `--dit-kv-actual-fixed-slots`: Physical device slots backing the fixed slots (adjacent steps share one). `0` = no sharing. Default: `0`.
+- `--dit-kv-actual-offloadable-slots`: Physical CPU buffers backing the offloadable slots (adjacent steps share one). `0` = no sharing. Default: `0`.
 - `--dit-kv-cache-length`: Maximum sequence positions kept in the cache. Default: `0` = max LLM length × 10.
+
+The number of diffusion steps is read from the model's `decoder.diffusion_steps` GGUF metadata (defaulting to 10 when absent). It can be overridden at load time via `cosyvoice_context_params_v4_t::diffusion_steps` — `--diffusion-steps` on the CLI/server (pass `<= 0` to keep the metadata value); any value is clamped to the runtime maximum of 50. Query the effective count with `cosyvoice_get_diffusion_steps()`.
 
 Suggested starting points (10 diffusion steps total):
 
@@ -408,7 +418,7 @@ Streaming is enabled via `--stream` flag on CLI/server. Chunk granularity is con
 
 ## Inference Buffer Policies
 
-The inference engine uses a buffer policy that controls how intermediate tensors are allocated:
+The inference engine uses a buffer policy that controls how intermediate tensors are allocated (default: `dedicated`; the non-interactive one-shot CLI path always uses `shared`):
 
 - `shared`: LLM KV cache shares memory with DiT intermediate buffers. Each inference runs the LLM module fully. Saves memory but can cause instability on CUDA when Flash Attention is disabled.
 - `balanced`: Like `shared`, but offloads reusable LLM KV cache to CPU after LLM inference completes.
@@ -490,7 +500,7 @@ Current backend test results are as follows:
 
 ## Third-Party Notices
 - See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for bundled dependency license details.
-- Core tensor compute library: **GGML** (MIT, vendored/auto-cloned) — the foundation split out of llama.cpp; a small Metal patch is applied at build time.
+- Core tensor compute library: **GGML** (MIT, vendored/auto-cloned) — the foundation split out of llama.cpp; consumed as unmodified upstream code.
 - **llama.cpp** (MIT): tokenizer implementation adapted from it; **ONNX Runtime** (MIT), **ICU** (Unicode license), and **SIMDe** (MIT, optional) power the frontend and SIMD emulation.
 - FFT implementation references/adapts KissFFT (BSD-3-Clause) with project-specific SIMD optimizations; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 

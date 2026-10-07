@@ -152,7 +152,7 @@ Loads model context with explicit backend and threading parameters.
 - `params`: Context parameters. When `params_version` selects an extended layout, pass a pointer to the embedded `base_params` member (it is the first member, so the struct address works too).
 - `backend`: Optional backend handle. If non-null, ownership is transferred to the created context.
 - `n_threads`: CPU thread count; set `0` to use hardware concurrency when available.
-- `params_version`: Context-parameters version. `COSYVOICE_CONTEXT_PARAMS_VERSION` (`0`) — `cosyvoice_context_params_t`; `COSYVOICE_CONTEXT_PARAMS_V2_VERSION` (`1`) — `cosyvoice_context_params_v2_t`; `COSYVOICE_CONTEXT_PARAMS_V3_VERSION` (`2`) — `cosyvoice_context_params_v3_t`.
+- `params_version`: Context-parameters version. `COSYVOICE_CONTEXT_PARAMS_VERSION` (`0`) — `cosyvoice_context_params_t`; `COSYVOICE_CONTEXT_PARAMS_V2_VERSION` (`1`) — `cosyvoice_context_params_v2_t`; `COSYVOICE_CONTEXT_PARAMS_V3_VERSION` (`2`) — `cosyvoice_context_params_v3_t`; `COSYVOICE_CONTEXT_PARAMS_V4_VERSION` (`3`) — `cosyvoice_context_params_v4_t`.
 
 ### Returns
 
@@ -163,7 +163,7 @@ Context handle on success; `NULL` on failure.
 - This API is available in both shared and static GGML builds.
 - `backend == NULL` means auto-select backend.
 - If `backend != NULL`, ownership is transferred to the created context and released by `cosyvoice_free()`.
-- In C++, a template overload of this function (4 arguments, no `params_version`) deduces the version from the static type of `params` — it accepts `cosyvoice_context_params_t`, `..._v2_t`, `..._v3_t`, and the flat C++ variants `..._v2_cpp` / `..._v3_cpp`.
+- In C++, a template overload of this function (4 arguments, no `params_version`) deduces the version from the static type of `params` — it accepts `cosyvoice_context_params_t`, `..._v2_t`, `..._v3_t`, `..._v4_t`, and the flat C++ variants `..._v2_cpp` / `..._v3_cpp` / `..._v4_cpp`.
 
 ## cosyvoice_load_ext
 
@@ -191,7 +191,7 @@ Loads a model context from a memory buffer with explicit backend, threading, and
 - `params`: Context parameters.
 - `backend`: Optional backend handle. If non-null, ownership is transferred to the created context.
 - `n_threads`: CPU thread count; set `0` to use hardware concurrency when available.
-- `params_version`: Context parameters version. `COSYVOICE_CONTEXT_PARAMS_VERSION` (`0`) for `cosyvoice_context_params_t`, `COSYVOICE_CONTEXT_PARAMS_V2_VERSION` (`1`) for `cosyvoice_context_params_v2_t`, `COSYVOICE_CONTEXT_PARAMS_V3_VERSION` (`2`) for `cosyvoice_context_params_v3_t` (pass the embedded base pointer).
+- `params_version`: Context parameters version. `COSYVOICE_CONTEXT_PARAMS_VERSION` (`0`) for `cosyvoice_context_params_t`, `COSYVOICE_CONTEXT_PARAMS_V2_VERSION` (`1`) for `cosyvoice_context_params_v2_t`, `COSYVOICE_CONTEXT_PARAMS_V3_VERSION` (`2`) for `cosyvoice_context_params_v3_t`, `COSYVOICE_CONTEXT_PARAMS_V4_VERSION` (`3`) for `cosyvoice_context_params_v4_t` (pass the embedded base pointer).
 
 ### Returns
 
@@ -325,6 +325,38 @@ Runs one decode step and updates internal logits.
 ### Remarks
 
 This function only advances decode state. Call `cosyvoice_llm_prepare_probs()` before `cosyvoice_llm_sample_token()`.
+
+## cosyvoice_llm_prefill_logits
+
+### Syntax
+
+```c
+COSYVOICE_API bool cosyvoice_llm_prefill_logits(
+    cosyvoice_context_t ctx,
+    enum ggml_type      type,
+    const void*         data,
+    uint32_t            n_tokens
+);
+```
+
+### Description
+
+Prefills the LLM with a sequence of token embeddings and computes the logits of the next token in the same graph computation.
+
+### Parameters
+
+- `ctx`: Context handle.
+- `type`: Input element type.
+- `data`: Embedding buffer.
+- `n_tokens`: Token count.
+
+### Returns
+
+`true` on success; otherwise `false`.
+
+### Remarks
+
+Unlike `cosyvoice_llm_prefill()` followed by `cosyvoice_llm_decode()`, the attention output is evaluated for the final prefill position only, so the next-token distribution is available without an extra decode pass. Call `cosyvoice_llm_prepare_probs()` before `cosyvoice_llm_sample_token()`.
 
 ## cosyvoice_llm_prepare_probs
 

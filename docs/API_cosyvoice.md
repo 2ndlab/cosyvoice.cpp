@@ -411,7 +411,7 @@ Groups context creation options that affect backend behavior, memory planning, a
 - `llm_kv_cache_separate_buffers`: If true, allocate separate buffers for K and V caches using the types from `llm_k_cache_type` and `llm_v_cache_type`. Ignored when the unified `llm_kv_cache_type` does not have bit 31 set.
 - `llm_kv_cache_type`: Requested KV-cache storage type. Can be a plain enum value (unified, applied to both K and V) or a packed value created with `COSYVOICE_MAKE_SEPARATE_KV_CACHE` that encodes separate K, V, and fallback types.
 - `llm_allow_kv_cache_fallback`: Allows fallback to flash-attention-compatible KV type when unsupported.
-- `inference_buffer_policy`: Strategy for inference-buffer allocation and reuse.
+- `inference_buffer_policy`: Strategy for inference-buffer allocation and reuse. Defaults to `COSYVOICE_INFERENCE_BUFFER_POLICY_DEDICATED`.
 - `n_batch`: Kernel batch size.
 - `n_max_seq`: Maximum sequence length.
 - `seed`: RNG seed for built-in sampler and noise generation.
@@ -455,6 +455,176 @@ Initializes backend runtime using resources located in a custom directory.
 ### Remarks
 
 Loads backend resources from the specified directory and initializes the runtime.
+
+## COSYVOICE_SIMD_CONTROL_SUPPORTED
+
+### Syntax
+
+```c
+#if defined(__x86_64__) || defined(_M_X64)
+#define COSYVOICE_SIMD_CONTROL_SUPPORTED 1
+#endif
+```
+
+### Description
+
+Feature-test macro for the SIMD detection & control API. It is defined only on
+x86-64 builds; on non-x86 targets the library exports none of these symbols,
+so consumers must guard calls with this macro.
+
+## COSYVOICE_SIMD_CAP_SSE42 / _AVX / _FMA3 / _AVX2 / _AVX512 / _AVX10_1_256 / _AVX10_1_512
+
+### Syntax
+
+```c
+#define COSYVOICE_SIMD_CAP_SSE42       (1u << 0)
+#define COSYVOICE_SIMD_CAP_AVX         (1u << 1)
+#define COSYVOICE_SIMD_CAP_FMA3        (1u << 2)
+#define COSYVOICE_SIMD_CAP_AVX2        (1u << 3)
+#define COSYVOICE_SIMD_CAP_AVX512      (1u << 4)
+#define COSYVOICE_SIMD_CAP_AVX10_1_256 (1u << 5)
+#define COSYVOICE_SIMD_CAP_AVX10_1_512 (1u << 6)
+```
+
+### Description
+
+Bit flags for the CPU DSP SIMD capability classes used in
+`cosyvoice_simd_info_t`. They mirror the internal `simd_caps` bits in
+`src/simd-dispatch.h`. `COSYVOICE_SIMD_CAP_AVX512` also serves AVX10-512 parts
+(the dispatch runs them on the AVX-512 tier's kernels).
+
+## cosyvoice_simd_level_t
+
+### Syntax
+
+```c
+typedef enum cosyvoice_simd_level
+{
+    COSYVOICE_SIMD_LEVEL_AUTO        = 0,
+    COSYVOICE_SIMD_LEVEL_SCALAR      = 1,
+    COSYVOICE_SIMD_LEVEL_SSE42       = 2,
+    COSYVOICE_SIMD_LEVEL_AVX         = 3,
+    COSYVOICE_SIMD_LEVEL_AVX2        = 4,
+    COSYVOICE_SIMD_LEVEL_AVX10_1_256 = 5,
+    COSYVOICE_SIMD_LEVEL_AVX512      = 6,
+    COSYVOICE_SIMD_LEVEL_COUNT
+} cosyvoice_simd_level_t;
+```
+
+### Description
+
+Runtime cap on the SIMD tier the CPU DSP dispatch may choose. The dispatch
+chain tries tiers from most capable to least capable (AVX-512/AVX10-512 →
+AVX10.1-256 → AVX2 → AVX → SSE4.2 → scalar); setting a level allows every tier
+at or below it and disables everything above it.
+
+### Values
+
+- `COSYVOICE_SIMD_LEVEL_AUTO`: no cap; use the fastest available tier (default).
+- `COSYVOICE_SIMD_LEVEL_SCALAR`: disable SIMD at runtime, force scalar kernels.
+- `COSYVOICE_SIMD_LEVEL_SSE42`: cap at the SSE4.2-class tier.
+- `COSYVOICE_SIMD_LEVEL_AVX`: cap at the AVX-class tier.
+- `COSYVOICE_SIMD_LEVEL_AVX2`: cap at the AVX2+FMA3-class tier.
+- `COSYVOICE_SIMD_LEVEL_AVX10_1_256`: cap below the 512-bit tiers; the AVX10-256
+  tier is still allowed.
+- `COSYVOICE_SIMD_LEVEL_AVX512`: explicitly allow everything (equivalent to
+  `COSYVOICE_SIMD_LEVEL_AUTO`).
+
+## cosyvoice_simd_info_t
+
+### Syntax
+
+```c
+typedef struct cosyvoice_simd_info
+{
+    uint32_t                 supported;
+    uint32_t                 built;
+    uint32_t                 current;
+    cosyvoice_simd_level_t   level;
+    bool                     scalar_only;
+} cosyvoice_simd_info_t;
+```
+
+### Description
+
+Snapshot of the SIMD detection and runtime-capping state, filled by
+`cosyvoice_get_simd_info()`.
+
+### Fields
+
+- `supported`: capabilities detected on the CPU (`COSYVOICE_SIMD_CAP_*` bits).
+  Always 0 in scalar-only (`COSYVOICE_NO_SIMD`) builds.
+- `built`: tiers compiled into this build. The scalar fallback tier is always
+  available on x86 and is not represented as a bit.
+- `current`: capabilities the dispatch currently selects — `supported` ∩
+  `built` ∩ the active level cap.
+- `level`: the currently set level cap (`COSYVOICE_SIMD_LEVEL_AUTO` when no
+  cap is active).
+- `scalar_only`: true when the build was compiled with `COSYVOICE_NO_SIMD`.
+
+## cosyvoice_get_simd_info
+
+### Syntax
+
+```c
+COSYVOICE_API void cosyvoice_get_simd_info(cosyvoice_simd_info_t* info);
+```
+
+### Description
+
+Queries the SIMD detection and runtime-capping state.
+
+### Parameters
+
+- `info`: output structure to fill. Passing NULL is safe (no-op).
+
+## cosyvoice_get_simd_level
+
+### Syntax
+
+```c
+COSYVOICE_API cosyvoice_simd_level_t cosyvoice_get_simd_level(void);
+```
+
+### Description
+
+Gets the currently set SIMD level cap.
+
+### Returns
+
+The current level; `COSYVOICE_SIMD_LEVEL_AUTO` when no cap is active.
+
+## cosyvoice_set_simd_level
+
+### Syntax
+
+```c
+COSYVOICE_API bool cosyvoice_set_simd_level(cosyvoice_simd_level_t level);
+```
+
+### Description
+
+Sets the SIMD level cap for all subsequent CPU DSP kernel calls. Process-global
+and thread-safe (atomic); in-flight kernels keep the tier they entered with.
+
+### Parameters
+
+- `level`: one of the `COSYVOICE_SIMD_LEVEL_*` values. `COSYVOICE_SIMD_LEVEL_AUTO`
+  restores uncapped dispatch. Levels above what the CPU supports or the build
+  includes are harmless — the dispatch clamps to the best available tier at or
+  below the level.
+
+### Returns
+
+True if the level is valid (and meaningful in scalar-only builds, where only
+`AUTO` and `SCALAR` are accepted), otherwise false.
+
+### Remarks
+
+Useful for debugging (e.g. validating the scalar tier or bisecting ISA-specific
+misbehavior) and for avoiding AVX-512 frequency throttling on mixed workloads.
+The detection part of the API is CPUID-based and fixed at startup; see
+[docs/SIMD.md](SIMD.md) for the dispatch architecture.
 
 ## cosyvoice_init_default_context_params
 
@@ -653,7 +823,7 @@ struct cosyvoice_context_params_v3_cpp : cosyvoice_context_params_v2_cpp
 
 ### Description
 
-Extends `cosyvoice_context_params_v2_t` with DiT (diffusion) KV cache configuration. During streaming TTS every chunk runs the DiT's diffusion steps; without caching each step of each new chunk recomputes self-attention over the whole sequence emitted so far. The KV cache keeps the attention key/values of already-emitted positions **per diffusion step** (one cache slot per step), so a chunk only computes its fresh positions — but the cache is large (up to `sequence_length × n_diffusion_steps` key-value pairs in total).
+Extends `cosyvoice_context_params_v2_t` with DiT (diffusion) KV cache configuration. During streaming TTS every chunk runs the DiT's diffusion steps; without caching each step of each new chunk recomputes self-attention over the whole sequence emitted so far. The KV cache keeps the attention key/values of already-emitted positions **per diffusion step** (by default one cache slot per step, shareable via V4's `dit_kv_actual_*_slots`), so a chunk only computes its fresh positions — but the cache is large (up to `sequence_length × n_diffusion_steps` key-value pairs in total).
 
 ### Fields
 
@@ -664,29 +834,66 @@ Extends `cosyvoice_context_params_v2_t` with DiT (diffusion) KV cache configurat
 - `dit_kv_cache_fallback`: Fallback type when preferred K/V type is unsupported.
 - `dit_kv_cache_type`: Shorthand — assigns a unified type (no separate K/V).
 - `dit_allow_kv_cache_fallback`: If true, fall back to a flash-attention-compatible type.
-- `dit_kv_fixed_slots`: Number of fixed (device memory, never offloaded) DiT KV slots. Each fixed slot holds the KV cache for one diffusion step and gets a dedicated device slot index.
-- `dit_kv_offloadable_slots`: Number of offloadable (CPU offload) DiT KV slots. All offloadable steps share a single device scratch slot and copy KV to/from one CPU buffer per slot.
+- `dit_kv_fixed_slots`: Number of fixed (device memory, never offloaded) DiT KV slots. Each fixed slot holds the KV cache for one diffusion step; by default each step gets a dedicated device slot, which can be reduced with `dit_kv_actual_fixed_slots` (V4).
+- `dit_kv_offloadable_slots`: Number of offloadable (CPU offload) DiT KV slots. All offloadable steps share a single device scratch slot and copy KV to/from CPU buffers — one per offloadable slot by default, or per group with `dit_kv_actual_offloadable_slots` (V4).
 - `dit_kv_cache_length`: Maximum sequence length for the DiT KV cache. 0 to use default (`n_max_seq × 10`).
 
 ### DiT KV Cache Concept
 
 See [README.md — Streaming TTS](../README.md#streaming-tts--dit-kv-cache) for a user-facing overview. This section documents how the cache is laid out internally.
 
-**Slot layout.** The device cache allocates `n_slots = fixed_slots + (offloadable_slots > 0 ? 1 : 0)` physical slots. When offloading is enabled, slot index 0 is a dedicated **scratch** slot shared by all offloadable steps; fixed steps then occupy slot indices `1..fixed_slots`. When offloading is disabled, the fixed slots occupy indices `0..fixed_slots-1`.
+**Slot layout.** The device cache allocates `n_slots = actual_fixed_slots + (offloadable_slots > 0 ? 1 : 0)` physical slots, where `actual_fixed_slots` defaults to `fixed_slots` unless KV sharing is enabled (see `cosyvoice_context_params_v4_t`). When offloading is enabled, slot index 0 is a dedicated **scratch** slot shared by all offloadable steps; fixed groups then occupy slot indices `1..actual_fixed_slots`. When offloading is disabled, the fixed groups occupy indices `0..actual_fixed_slots-1`.
 
-**Step-to-slot scheduling.** The `diffusion_steps` (10) are partitioned in order into `n_nocache = 10 − fixed − offloadable` uncached steps, then the offloadable steps, then the fixed steps:
+**Step-to-slot scheduling.** The `diffusion_steps` (10 by default) are partitioned in order into `n_nocache = diffusion_steps − fixed − offloadable` uncached steps, then the offloadable steps, then the fixed steps:
 
 - **Uncached steps** recompute attention every step and touch no KV slot.
-- **Offloadable steps** all compute into slot 0, then copy KV to their own CPU buffer (`offload_slot`), and reload it on the next step. One CPU buffer is allocated per offloadable slot.
-- **Fixed steps** each write to their dedicated device slot; their KV persists on device so the last fixed step seeds the cache of the next streaming chunk.
+- **Offloadable steps** all compute into slot 0. Each CPU-group's first step loads its CPU buffer and its last step stores it back; one CPU buffer is allocated per offloadable group.
+- **Fixed steps** are mapped onto device slots in balanced groups of adjacent steps (`slot = first_fixed_slot + (step − group_start_step) × actual_fixed / fixed`); each group shares one slot whose KV persists on device, so the last fixed group seeds the cache of the next streaming chunk.
 
-**Flash Attention path.** With `flow_use_flash_attn` the graph is built once and reused while the view chain slides through slots via `slide_kv_slot`. The boundary slide from the scratch slot (last offloadable step) into slot 1 hands KV off to the fixed chain; fixed steps never rebind, so their chain position is determined purely by the slide index.
+**Flash Attention path.** With `flow_use_flash_attn` the graph is built once and reused while the view chain slides through slots via `slide_kv_slot`. The boundary slide from the scratch slot (last offloadable step) into the first fixed slot hands KV off to the fixed chain; within a fixed group no slide is needed (the steps share one slot), and slides fire at group boundaries. Fixed steps never rebind, so their chain position is determined purely by the slide index.
 
-**Non-FA path.** Each cached step rebuilds a fresh graph. The step config rebinds an explicit slot — offloadable steps `bind_slot(0)`, fixed steps `bind_slot(step + slot_offset)` — so the fixed steps land on their dedicated slot indices.
+**Non-FA path.** Each cached step rebuilds a fresh graph. The step config rebinds an explicit slot — offloadable steps `bind_slot(0)`, fixed steps `bind_slot(physical group slot)` — so the fixed steps land on their group's slot index.
 
-**Normalization and clamping.** At load time a single offloadable slot (`offloadable == 1`) is converted to a fixed slot (`fixed++, offloadable = 0`), and both counts are clamped so `fixed ≤ 10` and `fixed + offloadable ≤ 10`. The builder also allocates `offloadable` CPU-safe KV buffers used to round-trip offloaded state.
+**Normalization and clamping.** At load time a single offloadable slot (`offloadable == 1`) is converted to a fixed slot (`fixed++, offloadable = 0`), and both counts are clamped so `fixed ≤ diffusion_steps` and `fixed + offloadable ≤ diffusion_steps`. The physical counts are then clamped to `[1, fixed]` / `[1, offloadable]` (`0` keeps the nominal count, i.e. no sharing). The builder also allocates `actual_offloadable` CPU-safe KV buffers used to round-trip offloaded state.
 
 **Cache length.** `dit_kv_cache_length` caps the max sequence positions retained per slot. When the stream exceeds it, part of the context is discarded — inference continues normally and never crashes, but audio quality may degrade.
+
+## cosyvoice_context_params_v4_t
+
+### Syntax
+
+```c
+typedef struct cosyvoice_context_params_v4
+{
+    cosyvoice_context_params_v3_t base_params;
+    int32_t diffusion_steps;
+    uint32_t dit_kv_actual_fixed_slots;
+    uint32_t dit_kv_actual_offloadable_slots;
+    bool     strict_seed_mode;
+} cosyvoice_context_params_v4_t;
+
+#ifdef __cplusplus
+struct cosyvoice_context_params_v4_cpp : cosyvoice_context_params_v3_cpp
+{
+    int32_t  diffusion_steps;
+    uint32_t dit_kv_actual_fixed_slots;
+    uint32_t dit_kv_actual_offloadable_slots;
+    bool     strict_seed_mode;
+};
+#endif
+```
+
+### Description
+
+Extends `cosyvoice_context_params_v3_t` with the number of flow-matching diffusion steps run by the DiT per chunk, with optional sharing of the DiT KV cache across adjacent diffusion steps (see below), and with a strict seed reproducibility mode.
+
+### Fields
+
+- `base_params`: V3 base parameters (including the DiT KV cache configuration).
+- `diffusion_steps`: Number of flow-matching diffusion steps. When `<= 0`, the value is taken from the model's `decoder.diffusion_steps` GGUF metadata, which itself defaults to 10 when the key is absent. Any positive value is clamped to the runtime maximum (50). The DiT KV slot counts are clamped against the resolved step count.
+- `dit_kv_actual_fixed_slots`: Number of **physical** device KV slots backing the `dit_kv_fixed_slots` logical slots. Adjacent fixed steps are partitioned into this many groups; each group shares one device slot, so the resident DiT KV cache shrinks to `actual_fixed / fixed` of its original size at the cost of each group reading the last-written step's history (a small approximation). `0` disables sharing (one slot per fixed step); positive values are clamped to `[1, dit_kv_fixed_slots]`.
+- `dit_kv_actual_offloadable_slots`: Number of **physical** CPU KV buffers backing the `dit_kv_offloadable_slots` logical slots. Adjacent offloadable steps are partitioned into this many groups; each group shares one CPU buffer and only loads it at its first step and stores it at its last step, cutting both memory and CPU round-trips. `0` disables sharing (one buffer per offloadable step); positive values are clamped to `[1, dit_kv_offloadable_slots]`.
+- `strict_seed_mode`: When true, repeated generations with the same sampler seed are strictly guaranteed to produce identical results. When false, generation skips a small prefill pass and is slightly faster, but strict seed reproducibility is no longer guaranteed. The library default is `true`: loads with V1–V3 parameter structs always run strict mode. With a V4 struct the flag is taken verbatim (there is no "0 = default" sentinel for a bool), so a zero-initialized `cosyvoice_context_params_v4_t params = {}` means strict mode is **off** — set it explicitly.
 
 ## cosyvoice_load_from_file_with_params_v3
 
@@ -707,6 +914,30 @@ Loads a model context with V3 extended parameters, including DiT KV cache config
 
 - `filename`: Path to the model file.
 - `params`: V3 context-parameter block.
+
+### Returns
+
+Loaded context handle on success; `NULL` on failure.
+
+## cosyvoice_load_from_file_with_params_v4
+
+### Syntax
+
+```c
+COSYVOICE_API cosyvoice_context_t cosyvoice_load_from_file_with_params_v4(
+    const char*                          filename,
+    const cosyvoice_context_params_v4_t* params
+);
+```
+
+### Description
+
+Loads a model context with V4 extended parameters, adding a custom diffusion step count on top of the V3 DiT KV cache configuration.
+
+### Parameters
+
+- `filename`: Path to the model file.
+- `params`: V4 context-parameter block.
 
 ### Returns
 
@@ -899,7 +1130,7 @@ Queries whether the backend appears to use unified memory architecture (UMA).
 
 ### Remarks
 
-The result is determined at model load time by probing the backend memory bandwidth. On Apple Silicon (`__aarch64__`), UMA is assumed by default. On other platforms, the runtime compares backend tensor-set bandwidth against host `memcpy` bandwidth. When UMA is detected and the requested buffer policy is `balanced`, the library automatically switches to `dedicated` to avoid redundant buffer sharing. This query is useful for callers that want to display backend characteristics or make policy decisions based on the memory architecture.
+The result is determined at model load time by probing the backend memory bandwidth. On Apple Silicon (`__aarch64__`), UMA is assumed by default. On other platforms, the runtime compares backend tensor-set bandwidth against host `memcpy` bandwidth. The result is purely informational: it does not change any buffer policy or other library behavior. This query is useful for callers that want to display backend characteristics or make policy decisions based on the memory architecture.
 
 > **Note**: UMA detection is a heuristic based on bandwidth probing. Results may be inaccurate depending on hardware, driver version, and system load at probe time. Treat the result as a rough hint rather than a definitive hardware capability.
 
@@ -942,6 +1173,26 @@ Returns output sample rate of the loaded model.
 ### Returns
 
 Sample rate in Hz.
+
+## cosyvoice_get_diffusion_steps
+
+### Syntax
+
+```c
+COSYVOICE_API int cosyvoice_get_diffusion_steps(cosyvoice_context_t ctx);
+```
+
+### Description
+
+Returns the effective number of flow-matching diffusion steps used by the model's DiT decoder. This is the value resolved at load time from the `cosyvoice_context_params_v4_t::diffusion_steps` override, the `decoder.diffusion_steps` GGUF metadata, or the built-in default of 10, after clamping to the runtime maximum.
+
+### Parameters
+
+- `ctx`: Context handle.
+
+### Returns
+
+The effective diffusion step count (always `>= 1`).
 
 ## cosyvoice_set_generation_config
 

@@ -12,6 +12,7 @@ These interfaces are internal implementation details and do not guarantee ABI st
 struct cosyvoice_model_context
 {
     virtual uint32_t get_sample_rate() = 0;
+    virtual int get_diffusion_steps() = 0;
     virtual void get_default_generation_config(cosyvoice_generation_config_t* config) = 0;
     virtual void get_generation_config(cosyvoice_generation_config_t* config) = 0;
     virtual bool set_generation_config(const cosyvoice_generation_config_t* config) = 0;
@@ -31,6 +32,7 @@ struct cosyvoice_model_context
     virtual uint32_t get_sampler_seed() = 0;
 
     virtual bool llm_prefill(ggml_type type, const void* data, uint32_t seq_len) = 0;
+    virtual bool llm_prefill_logits(ggml_type type, const void* data, uint32_t seq_len) = 0;
     virtual bool llm_decode(ggml_type type, const void* data) = 0;
     virtual void llm_prepare_probs(bool allow_stop_tokens) = 0;
 
@@ -121,6 +123,22 @@ Gets model output sample rate.
 ### Returns
 
 Sample rate in Hz.
+
+## cosyvoice_model_context::get_diffusion_steps
+
+### Syntax
+
+```cpp
+virtual int get_diffusion_steps() = 0;
+```
+
+### Description
+
+Gets the effective number of flow-matching diffusion steps used by the model's DiT decoder, as resolved at load time from context parameters / GGUF metadata and clamped to the runtime maximum.
+
+### Returns
+
+The diffusion step count (always `>= 1`).
 
 ## cosyvoice_model_context::get_generation_config
 
@@ -308,7 +326,7 @@ Queries whether the backend appears to use unified memory architecture (UMA).
 
 ### Remarks
 
-The result is determined at model load time. The runtime compares backend tensor-write bandwidth against host `memcpy` bandwidth; if the backend achieves at least 70% of host memcpy throughput, UMA is assumed. On Apple Silicon (`__aarch64__`), UMA is always reported.
+The result is determined at model load time. The runtime compares backend tensor-write bandwidth against host `memcpy` bandwidth; if the backend achieves at least 70% of host memcpy throughput, UMA is assumed. On Apple Silicon (`__aarch64__`), UMA is always reported. The result is purely informational and does not change any buffer policy or other library behavior.
 
 > **Note**: UMA detection is a heuristic based on bandwidth probing. Results may be inaccurate depending on hardware, driver version, and system load at probe time. Treat the result as a rough hint rather than a definitive hardware capability.
 
@@ -447,6 +465,32 @@ Prefills LLM with embedding sequence.
 ### Returns
 
 `true` on success; otherwise `false`.
+
+## cosyvoice_model_context::llm_prefill_logits
+
+### Syntax
+
+```cpp
+virtual bool llm_prefill_logits(ggml_type type, const void* data, uint32_t seq_len) = 0;
+```
+
+### Description
+
+Prefills LLM with embedding sequence and computes the next-token logits in the same graph run. Unlike `llm_prefill()` followed by `llm_decode()`, the attention output is evaluated for the final prefill position only.
+
+### Parameters
+
+- `type`: Embedding element type.
+- `data`: Embedding buffer.
+- `seq_len`: Sequence length.
+
+### Returns
+
+`true` on success; otherwise `false`.
+
+### Remarks
+
+Call `llm_prepare_probs()` before sampling.
 
 ## cosyvoice_model_context::llm_decode
 

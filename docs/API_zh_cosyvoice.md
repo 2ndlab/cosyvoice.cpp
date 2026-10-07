@@ -405,7 +405,7 @@ typedef struct cosyvoice_context_params
 - `llm_kv_cache_separate_buffers`：为 true 时，K 和 V 缓存使用独立缓冲区，分别由 `llm_k_cache_type` 和 `llm_v_cache_type` 指定类型。当统一 `llm_kv_cache_type` 的 bit 31 未设置时此字段被忽略。
 - `llm_kv_cache_type`：KV 缓存数据类型。可以是普通的枚举值（统一类型，K 和 V 使用相同格式），也可以是 `COSYVOICE_MAKE_SEPARATE_KV_CACHE` 创建的打包值（分别编码 K、V 和回退类型）。
 - `llm_allow_kv_cache_fallback`：不兼容时是否允许回退 KV 类型。
-- `inference_buffer_policy`：推理缓冲策略。
+- `inference_buffer_policy`：推理缓冲策略，默认 `COSYVOICE_INFERENCE_BUFFER_POLICY_DEDICATED`。
 - `n_batch`：推理批大小。
 - `n_max_seq`：最大序列长度。
 - `seed`：随机种子。
@@ -457,6 +457,166 @@ COSYVOICE_API void cosyvoice_init_backend_from_path(const char* dir_path);
 ### 返回值
 
 无返回值。
+
+## COSYVOICE_SIMD_CONTROL_SUPPORTED
+
+### 语法
+
+```c
+#if defined(__x86_64__) || defined(_M_X64)
+#define COSYVOICE_SIMD_CONTROL_SUPPORTED 1
+#endif
+```
+
+### 说明
+
+SIMD 检测与控制 API 的特性检测宏。仅在 x86-64 构建中定义；非 x86 目标不导出
+本节任何符号，调用方需用该宏保护相关调用。
+
+## COSYVOICE_SIMD_CAP_SSE42 / _AVX / _FMA3 / _AVX2 / _AVX512 / _AVX10_1_256 / _AVX10_1_512
+
+### 语法
+
+```c
+#define COSYVOICE_SIMD_CAP_SSE42       (1u << 0)
+#define COSYVOICE_SIMD_CAP_AVX         (1u << 1)
+#define COSYVOICE_SIMD_CAP_FMA3        (1u << 2)
+#define COSYVOICE_SIMD_CAP_AVX2        (1u << 3)
+#define COSYVOICE_SIMD_CAP_AVX512      (1u << 4)
+#define COSYVOICE_SIMD_CAP_AVX10_1_256 (1u << 5)
+#define COSYVOICE_SIMD_CAP_AVX10_1_512 (1u << 6)
+```
+
+### 说明
+
+CPU DSP SIMD 能力类的位标志，用于 `cosyvoice_simd_info_t`，与
+`src/simd-dispatch.h` 中的内部 `simd_caps` 位一一对应。
+`COSYVOICE_SIMD_CAP_AVX512` 同样服务于 AVX10-512 机器（分派将其引导到
+AVX-512 层内核）。
+
+## cosyvoice_simd_level_t
+
+### 语法
+
+```c
+typedef enum cosyvoice_simd_level
+{
+    COSYVOICE_SIMD_LEVEL_AUTO        = 0,
+    COSYVOICE_SIMD_LEVEL_SCALAR      = 1,
+    COSYVOICE_SIMD_LEVEL_SSE42       = 2,
+    COSYVOICE_SIMD_LEVEL_AVX         = 3,
+    COSYVOICE_SIMD_LEVEL_AVX2        = 4,
+    COSYVOICE_SIMD_LEVEL_AVX10_1_256 = 5,
+    COSYVOICE_SIMD_LEVEL_AVX512      = 6,
+    COSYVOICE_SIMD_LEVEL_COUNT
+} cosyvoice_simd_level_t;
+```
+
+### 说明
+
+CPU DSP 分派可选中 SIMD 层级的运行时上限。分派链按能力从高到低尝试
+（AVX-512/AVX10-512 → AVX10.1-256 → AVX2 → AVX → SSE4.2 → 标量）；设置某层级
+即允许该层及以下所有层、禁用其以上所有层。
+
+### 取值
+
+- `COSYVOICE_SIMD_LEVEL_AUTO`：不设上限，使用可用的最快层级（默认）。
+- `COSYVOICE_SIMD_LEVEL_SCALAR`：运行时禁用 SIMD，强制标量内核。
+- `COSYVOICE_SIMD_LEVEL_SSE42`：封顶到 SSE4.2 层。
+- `COSYVOICE_SIMD_LEVEL_AVX`：封顶到 AVX 层。
+- `COSYVOICE_SIMD_LEVEL_AVX2`：封顶到 AVX2+FMA3 层。
+- `COSYVOICE_SIMD_LEVEL_AVX10_1_256`：禁用 512 位层，AVX10-256 层仍可用。
+- `COSYVOICE_SIMD_LEVEL_AVX512`：显式放行全部层级（与 `AUTO` 等价）。
+
+## cosyvoice_simd_info_t
+
+### 语法
+
+```c
+typedef struct cosyvoice_simd_info
+{
+    uint32_t                 supported;
+    uint32_t                 built;
+    uint32_t                 current;
+    cosyvoice_simd_level_t   level;
+    bool                     scalar_only;
+} cosyvoice_simd_info_t;
+```
+
+### 说明
+
+由 `cosyvoice_get_simd_info()` 填充的 SIMD 检测与运行时封顶状态快照。
+
+### 字段
+
+- `supported`：CPU 检测到的能力（`COSYVOICE_SIMD_CAP_*` 位）。纯标量
+  （`COSYVOICE_NO_SIMD`）构建中恒为 0。
+- `built`：本构建编译进的层级。x86 上标量兜底层始终可用，不以位表示。
+- `current`：分派当前实际选中的能力，即 `supported` ∩ `built` ∩ 层级上限。
+- `level`：当前设置的层级上限（无上限时为 `COSYVOICE_SIMD_LEVEL_AUTO`）。
+- `scalar_only`：为 true 表示构建时启用了 `COSYVOICE_NO_SIMD`。
+
+## cosyvoice_get_simd_info
+
+### 语法
+
+```c
+COSYVOICE_API void cosyvoice_get_simd_info(cosyvoice_simd_info_t* info);
+```
+
+### 说明
+
+查询 SIMD 检测与运行时封顶状态。
+
+### 参数
+
+- `info`：输出结构体。传入 NULL 安全（空操作）。
+
+## cosyvoice_get_simd_level
+
+### 语法
+
+```c
+COSYVOICE_API cosyvoice_simd_level_t cosyvoice_get_simd_level(void);
+```
+
+### 说明
+
+获取当前设置的 SIMD 层级上限。
+
+### 返回值
+
+当前层级；未设置上限时返回 `COSYVOICE_SIMD_LEVEL_AUTO`。
+
+## cosyvoice_set_simd_level
+
+### 语法
+
+```c
+COSYVOICE_API bool cosyvoice_set_simd_level(cosyvoice_simd_level_t level);
+```
+
+### 说明
+
+为后续所有 CPU DSP 内核调用设置 SIMD 层级上限。进程级全局、线程安全
+（原子操作）；进行中的内核保持其进入时的层级。
+
+### 参数
+
+- `level`：`COSYVOICE_SIMD_LEVEL_*` 之一。`COSYVOICE_SIMD_LEVEL_AUTO` 恢复无上限
+  分派。高于 CPU 支持或构建包含范围的层级无害——分派会自动钳制到该层级及以下
+  可用的最佳层。
+
+### 返回值
+
+层级合法（且在纯标量构建中有意义——该构建仅接受 `AUTO` 与 `SCALAR`）时
+返回 true，否则 false。
+
+### 备注
+
+可用于调试（如对标验证标量层、二分定位某指令集相关问题），或在混合负载下
+规避 AVX-512 降频。检测部分基于 CPUID、启动时一次性完成；分派架构详见
+[docs/SIMD_zh.md](SIMD_zh.md)。
 
 ## cosyvoice_init_default_context_params
 
@@ -658,7 +818,7 @@ struct cosyvoice_context_params_v3_cpp : cosyvoice_context_params_v2_cpp
 
 ### 说明
 
-在 `cosyvoice_context_params_v2_t` 基础上增加 DiT（扩散模型）KV 缓存配置。流式 TTS 时每个块都要跑完 DiT 的全部扩散步——没有缓存时，每个新块的每一步都会对已产出的整个音频序列重算自注意力。KV 缓存按扩散步保存已产出位置的注意力 key/value（每个扩散步一个缓存槽位），新块只需计算自己新增的位置——但缓存本身非常大（合计最多 `sequence_length × n_diffusion_steps` 个 key-value 对）。
+在 `cosyvoice_context_params_v2_t` 基础上增加 DiT（扩散模型）KV 缓存配置。流式 TTS 时每个块都要跑完 DiT 的全部扩散步——没有缓存时，每个新块的每一步都会对已产出的整个音频序列重算自注意力。KV 缓存按扩散步保存已产出位置的注意力 key/value（默认每个扩散步一个缓存槽位，可通过 V4 的 `dit_kv_actual_*_slots` 让多个步共享），新块只需计算自己新增的位置——但缓存本身非常大（合计最多 `sequence_length × n_diffusion_steps` 个 key-value 对）。
 
 ### 成员
 
@@ -669,29 +829,66 @@ struct cosyvoice_context_params_v3_cpp : cosyvoice_context_params_v2_cpp
 - `dit_kv_cache_fallback`：首选类型不受支持时的回退类型。
 - `dit_kv_cache_type`：快捷方式——指定统一类型（不分离 K/V）。
 - `dit_allow_kv_cache_fallback`：若为 true，不支持时回退到 flash attention 兼容类型。
-- `dit_kv_fixed_slots`：固定（设备内存，从不卸载）DiT KV 槽位数。每个固定步对应一个扩散步的 KV 缓存，独占一个设备槽位。
-- `dit_kv_offloadable_slots`：可卸载（CPU 卸载）DiT KV 槽位数。所有可卸载步共享同一个设备临时槽位，每槽各对应一个 CPU 缓冲区来拷贝 KV。
+- `dit_kv_fixed_slots`：固定（设备内存，从不卸载）DiT KV 槽位数。每个固定槽位对应一个扩散步的 KV 缓存；默认每步独占一个设备槽位，可通过 V4 的 `dit_kv_actual_fixed_slots` 让多个步共享以减少占用。
+- `dit_kv_offloadable_slots`：可卸载（CPU 卸载）DiT KV 槽位数。所有可卸载步共享同一个设备临时槽位，默认每槽各对应一个 CPU 缓冲区来拷贝 KV，可通过 V4 的 `dit_kv_actual_offloadable_slots` 让多个步共享一个缓冲区。
 - `dit_kv_cache_length`：DiT KV 缓存最大序列长度。0 表示使用默认值（`n_max_seq × 10`）。
 
 ### DiT KV 缓存概念
 
 面向用户的概述见 [README_zh.md — 流式 TTS 与 DiT KV 缓存](../README_zh.md#流式-tts-与-dit-kv-缓存)；以下说明内部布局。
 
-**槽位布局。** 设备缓存分配 `n_slots = fixed_slots + (offloadable_slots > 0 ? 1 : 0)` 个物理槽位。启用卸载时，槽位 0 是专用 **临时（scratch）槽位**，由所有可卸载步共享；固定步占用槽位 `1..fixed_slots`。未启用卸载时，固定步占用槽位 `0..fixed_slots-1`。
+**槽位布局。** 设备缓存分配 `n_slots = actual_fixed_slots + (offloadable_slots > 0 ? 1 : 0)` 个物理槽位，其中 `actual_fixed_slots` 在未启用 KV 共享时等于 `fixed_slots`（见 `cosyvoice_context_params_v4_t`）。启用卸载时，槽位 0 是专用 **临时（scratch）槽位**，由所有可卸载步共享；固定组占用槽位 `1..actual_fixed_slots`。未启用卸载时，固定组占用槽位 `0..actual_fixed_slots-1`。
 
-**步-槽位调度。** `diffusion_steps`（10 步）按顺序划分：`n_nocache = 10 − fixed − offloadable` 个不缓存步、可卸载步、最后是固定步：
+**步-槽位调度。** `diffusion_steps`（默认 10 步）按顺序划分：`n_nocache = diffusion_steps − fixed − offloadable` 个不缓存步、可卸载步、最后是固定步：
 
 - **不缓存步**每步全量重算注意力，不接触任何 KV 槽位。
-- **可卸载步**全部写入槽位 0，随后把 KV 拷贝到各自独立的 CPU 缓冲区（`offload_slot`），下一步再拷贝回来。每个可卸载槽位分配一个 CPU 缓冲区。
-- **固定步**各自写入专属设备槽位；KV 常驻设备，因此最后一个固定步会为下一个流式 chunk 播种缓存。
+- **可卸载步**全部写入槽位 0。每个 CPU 分组的第一个步把该组缓冲区拷贝回设备，最后一个步把结果拷贝回去；每个可卸载分组分配一个 CPU 缓冲区。
+- **固定步**按相邻分组映射到设备槽位（`槽位 = 首个固定槽位 + (步 − 组起始步) × actual_fixed / fixed`），每组共享一个槽位，组内后写者覆盖前者；各组 KV 常驻设备，因此最后一个固定组会为下一个流式 chunk 播种缓存。
 
-**Flash Attention 路径。** 启用 `flow_use_flash_attn` 时图只构建一次，通过 `slide_kv_slot` 沿槽位链滑动画图视图。最后一个可卸载步执行从临时槽位到槽位 1 的边界滑动，把 KV 移交给固定链；固定步从不重新绑定，其链位置完全由滑动索引决定。
+**Flash Attention 路径。** 启用 `flow_use_flash_attn` 时图只构建一次，通过 `slide_kv_slot` 沿槽位链滑动画图视图。最后一个可卸载步执行从临时槽位到第一个固定槽位的边界滑动，把 KV 移交给固定链；固定组内部各步共享同一槽位，无需滑动，滑动只在组边界触发。固定步从不重新绑定，其链位置完全由滑动索引决定。
 
-**非 FA 路径。** 每个缓存步重新构建图，并在构建时显式绑定槽位——可卸载步 `bind_slot(0)`，固定步 `bind_slot(step + slot_offset)`，从而落到各自的专属槽位。
+**非 FA 路径。** 每个缓存步重新构建图，并在构建时显式绑定槽位——可卸载步 `bind_slot(0)`，固定步绑定其分组对应的物理槽位。
 
-**归一化与裁剪。** 加载时若只有一个可卸载槽位（`offloadable == 1`），会转为固定槽位（`fixed++`、`offloadable = 0`）；两个数值还会被裁剪，保证 `fixed ≤ 10` 且 `fixed + offloadable ≤ 10`。构建器还会为 `offloadable` 分配对应的 CPU KV 缓冲区，用于往返卸载状态。
+**归一化与裁剪。** 加载时若只有一个可卸载槽位（`offloadable == 1`），会转为固定槽位（`fixed++`、`offloadable = 0`）；名义槽位数先被裁剪，保证 `fixed ≤ diffusion_steps` 且 `fixed + offloadable ≤ diffusion_steps`；随后物理槽位数裁剪到 `[1, fixed]` / `[1, offloadable]`（`0` 表示不共享，取名义值）。构建器还会为 `actual_offloadable` 分配对应的 CPU KV 缓冲区，用于往返卸载状态。
 
 **缓存长度。** `dit_kv_cache_length` 限制每个槽位保留的最大序列位置数。流式长度超过该值时只直接截断长度、丢弃后面的部分上下文——推理不会崩溃，但音频质量可能下降。
+
+## cosyvoice_context_params_v4_t
+
+### 语法
+
+```c
+typedef struct cosyvoice_context_params_v4
+{
+    cosyvoice_context_params_v3_t base_params;
+    int32_t diffusion_steps;
+    uint32_t dit_kv_actual_fixed_slots;
+    uint32_t dit_kv_actual_offloadable_slots;
+    bool     strict_seed_mode;
+} cosyvoice_context_params_v4_t;
+
+#ifdef __cplusplus
+struct cosyvoice_context_params_v4_cpp : cosyvoice_context_params_v3_cpp
+{
+    int32_t  diffusion_steps;
+    uint32_t dit_kv_actual_fixed_slots;
+    uint32_t dit_kv_actual_offloadable_slots;
+    bool     strict_seed_mode;
+};
+#endif
+```
+
+### 说明
+
+在 `cosyvoice_context_params_v3_t` 基础上增加每个 chunk 内 DiT 运行的流匹配（flow matching）扩散步数、让相邻扩散步共享 DiT KV 缓存（减少内存占用）的配置，以及严格 seed 复现模式。
+
+### 字段
+
+- `base_params`：V3 基础参数（含 DiT KV 缓存配置）。
+- `diffusion_steps`：流匹配扩散步数。当 `<= 0` 时取模型的 `decoder.diffusion_steps` GGUF 元数据（该元数据缺失时默认为 10）；任何正数都会被裁剪到运行时上限（50）。DiT KV 槽位数会依据最终生效的步数再次裁剪。
+- `dit_kv_actual_fixed_slots`：支撑 `dit_kv_fixed_slots` 个逻辑固定槽位的**物理**设备槽位数。相邻固定步被划分为该数量的分组，每组共享一个设备槽位：常驻 DiT KV 缓存缩小为原来的 `actual_fixed / fixed`，代价是组内各步读取的历史为组内最后写入者的结果（一种很小的近似）。`0` 表示不共享（每个固定步一个槽位）；正数被裁剪到 `[1, dit_kv_fixed_slots]`。
+- `dit_kv_actual_offloadable_slots`：支撑 `dit_kv_offloadable_slots` 个逻辑可卸载槽位的**物理** CPU 缓冲区数量。相邻可卸载步被划分为该数量的分组，每组共享一个 CPU 缓冲区，且只在组首步拷入、组尾步拷出，同时减少内存与 CPU 往返。`0` 表示不共享（每个可卸载步一个缓冲区）；正数被裁剪到 `[1, dit_kv_offloadable_slots]`。
+- `strict_seed_mode`：为 true 时严格保证相同 sampler seed 的重复生成结果一致；为 false 时省去一个小的 prefill 通道、速度略快，但不再严格保证 seed 可复现。库默认值为 `true`：使用 V1–V3 参数结构体加载时恒为严格模式。传 V4 结构体时该标志按原值取用（bool 没有"0 = 默认"的哨兵语义），因此零初始化的 `cosyvoice_context_params_v4_t params = {}` 表示严格模式**关闭**——请显式设置。
 
 ## cosyvoice_load_from_file_with_params_v3
 
@@ -712,6 +909,30 @@ COSYVOICE_API cosyvoice_context_t cosyvoice_load_from_file_with_params_v3(
 
 - `filename`：模型文件路径。
 - `params`：V3 上下文参数。
+
+### 返回值
+
+成功返回上下文句柄，失败返回 `NULL`。
+
+## cosyvoice_load_from_file_with_params_v4
+
+### 语法
+
+```c
+COSYVOICE_API cosyvoice_context_t cosyvoice_load_from_file_with_params_v4(
+    const char*                          filename,
+    const cosyvoice_context_params_v4_t* params
+);
+```
+
+### 说明
+
+使用 V4 扩展参数加载模型上下文，在 V3 的 DiT KV 缓存配置之上增加了自定义扩散步数。
+
+### 参数
+
+- `filename`：模型文件路径。
+- `params`：V4 上下文参数。
 
 ### 返回值
 
@@ -912,7 +1133,7 @@ COSYVOICE_API bool cosyvoice_is_backend_uma(cosyvoice_context_t ctx);
 
 ### 备注
 
-UMA 判定在模型加载阶段完成：运行时通过对比后端 tensor 写入带宽与主机 `memcpy` 带宽来推断。Apple Silicon（`__aarch64__`）默认视为 UMA。当检测到 UMA 且请求的缓冲策略为 `balanced` 时，库会自动切换为 `dedicated` 以避免冗余缓冲共享。调用方可通过此接口展示后端特性或据此调整缓冲策略。
+UMA 判定在模型加载阶段完成：运行时通过对比后端 tensor 写入带宽与主机 `memcpy` 带宽来推断。Apple Silicon（`__aarch64__`）默认视为 UMA。该结果仅作信息展示，不会改变任何缓冲策略或其他库行为。调用方可通过此接口展示后端特性或据此调整缓冲策略。
 
 > **注意**：UMA 检测基于带宽探测的启发式方法，结果可能因硬件、驱动版本和探测时系统负载不同而有偏差，请将其视为粗略参考而非确定性的硬件能力判断。
 
@@ -959,6 +1180,26 @@ COSYVOICE_API uint32_t cosyvoice_get_sample_rate(cosyvoice_context_t ctx);
 ### 返回值
 
 采样率（Hz）。
+
+## cosyvoice_get_diffusion_steps
+
+### 语法
+
+```c
+COSYVOICE_API int cosyvoice_get_diffusion_steps(cosyvoice_context_t ctx);
+```
+
+### 说明
+
+返回模型 DiT 解码器实际使用的流匹配扩散步数。该值在加载时由 `cosyvoice_context_params_v4_t::diffusion_steps` 覆盖项、`decoder.diffusion_steps` GGUF 元数据、或内置默认值 10 解析得到，并已裁剪到运行时上限。
+
+### 参数
+
+- `ctx`：模型上下文。
+
+### 返回值
+
+实际生效的扩散步数（恒 `>= 1`）。
 
 ## cosyvoice_set_generation_config
 

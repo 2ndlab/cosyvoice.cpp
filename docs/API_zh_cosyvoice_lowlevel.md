@@ -152,7 +152,7 @@ COSYVOICE_API cosyvoice_context_t cosyvoice_load_from_file_ext(
 - `params`：上下文参数。当 `params_version` 选择扩展布局时，传入其内嵌 `base_params` 成员的指针（`base_params` 是首成员，直接传整个结构体的地址也可）。
 - `backend`：可选后端句柄。
 - `n_threads`：CPU 线程数；传 `0` 时在可用情况下使用硬件并发数。
-- `params_version`：上下文参数版本。`COSYVOICE_CONTEXT_PARAMS_VERSION`（`0`）对应 `cosyvoice_context_params_t`；`COSYVOICE_CONTEXT_PARAMS_V2_VERSION`（`1`）对应 `cosyvoice_context_params_v2_t`；`COSYVOICE_CONTEXT_PARAMS_V3_VERSION`（`2`）对应 `cosyvoice_context_params_v3_t`。
+- `params_version`：上下文参数版本。`COSYVOICE_CONTEXT_PARAMS_VERSION`（`0`）对应 `cosyvoice_context_params_t`；`COSYVOICE_CONTEXT_PARAMS_V2_VERSION`（`1`）对应 `cosyvoice_context_params_v2_t`；`COSYVOICE_CONTEXT_PARAMS_V3_VERSION`（`2`）对应 `cosyvoice_context_params_v3_t`；`COSYVOICE_CONTEXT_PARAMS_V4_VERSION`（`3`）对应 `cosyvoice_context_params_v4_t`。
 
 ### 返回值
 
@@ -163,7 +163,7 @@ COSYVOICE_API cosyvoice_context_t cosyvoice_load_from_file_ext(
 - 该接口在 GGML 动态库与静态库构建下都可用。
 - `backend == NULL` 表示自动选择后端。
 - 如果 `backend != NULL`，其所有权会转移给创建出的上下文，并在 `cosyvoice_free()` 时自动释放。
-- C++ 下本函数另有模板重载（4 个参数，不传 `params_version`），按 `params` 的静态类型自动推导版本——接受 `cosyvoice_context_params_t`、`..._v2_t`、`..._v3_t` 及扁平的 C++ 变体 `..._v2_cpp` / `..._v3_cpp`。
+- C++ 下本函数另有模板重载（4 个参数，不传 `params_version`），按 `params` 的静态类型自动推导版本——接受 `cosyvoice_context_params_t`、`..._v2_t`、`..._v3_t`、`..._v4_t` 及扁平的 C++ 变体 `..._v2_cpp` / `..._v3_cpp` / `..._v4_cpp`。
 
 ## cosyvoice_load_ext
 
@@ -191,7 +191,7 @@ COSYVOICE_API cosyvoice_context_t cosyvoice_load_ext(
 - `params`：上下文参数。
 - `backend`：可选后端句柄。
 - `n_threads`：CPU 线程数；传 `0` 时自动使用硬件并发数。
-- `params_version`：上下文参数版本。`COSYVOICE_CONTEXT_PARAMS_VERSION`（`0`）对应 `cosyvoice_context_params_t`，`COSYVOICE_CONTEXT_PARAMS_V2_VERSION`（`1`）对应 `cosyvoice_context_params_v2_t`，`COSYVOICE_CONTEXT_PARAMS_V3_VERSION`（`2`）对应 `cosyvoice_context_params_v3_t`（传内嵌 base 指针）。
+- `params_version`：上下文参数版本。`COSYVOICE_CONTEXT_PARAMS_VERSION`（`0`）对应 `cosyvoice_context_params_t`，`COSYVOICE_CONTEXT_PARAMS_V2_VERSION`（`1`）对应 `cosyvoice_context_params_v2_t`，`COSYVOICE_CONTEXT_PARAMS_V3_VERSION`（`2`）对应 `cosyvoice_context_params_v3_t`，`COSYVOICE_CONTEXT_PARAMS_V4_VERSION`（`3`）对应 `cosyvoice_context_params_v4_t`（传内嵌 base 指针）。
 
 ### 返回值
 
@@ -325,6 +325,38 @@ COSYVOICE_API bool cosyvoice_llm_decode(
 ### 备注
 
 该函数只推进解码状态。在调用 `cosyvoice_llm_sample_token()` 前，需要先调用 `cosyvoice_llm_prepare_probs()`。
+
+## cosyvoice_llm_prefill_logits
+
+### 语法
+
+```c
+COSYVOICE_API bool cosyvoice_llm_prefill_logits(
+    cosyvoice_context_t ctx,
+    enum ggml_type      type,
+    const void*         data,
+    uint32_t            n_tokens
+);
+```
+
+### 说明
+
+用一段 token embedding 序列对 LLM 执行 prefill，并在同一次图计算中一并计算下一个 token 的 logits。
+
+### 参数
+
+- `ctx`：模型上下文。
+- `type`：输入元素类型。
+- `data`：embedding 缓冲区。
+- `n_tokens`：token 数量。
+
+### 返回值
+
+成功返回 `true`，失败返回 `false`。
+
+### 备注
+
+与 `cosyvoice_llm_prefill()` 后再调用 `cosyvoice_llm_decode()` 不同，本函数的注意力输出只求值 prefill 的最后一个位置，因此无需额外的 decode 步骤即可获得下一 token 分布。在调用 `cosyvoice_llm_sample_token()` 前，需要先调用 `cosyvoice_llm_prepare_probs()`。
 
 ## cosyvoice_llm_prepare_probs
 
