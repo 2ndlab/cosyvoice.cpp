@@ -52,6 +52,7 @@ struct cli_options
     std::string model;
     std::string backend_path;
     std::string backend = "auto";
+    bool list_backends = false;
 #ifndef COSYVOICE_NO_FRONTEND
     bool frontend_only = false;
     std::string speech_tokenizer;
@@ -373,6 +374,7 @@ static void print_usage(const char* argv0)
     printf("  --backend <name>                            GGML backend name. Default: auto (best available).\n");
     printf("  --cpu                                       Use CPU backend (equivalent to --backend cpu).\n");
     printf("  --cuda                                      Use CUDA backend (equivalent to --backend cuda0).\n");
+    printf("  --list-backends                             List the GGML backends found at runtime and exit.\n");
 #ifdef COSYVOICE_SIMD_CONTROL_SUPPORTED
     printf("  --simd-level <auto|scalar|sse42|avx|avx2|avx10-256|avx512>\n");
     printf("                                              CPU DSP SIMD tier cap (x86-64). Default: auto (or the COSYVOICE_SIMD_LEVEL env var).\n");
@@ -496,6 +498,34 @@ static void print_warning_log(const char* format, ...)
     vfprintf(stderr, format, args);
     va_end(args);
     fprintf(stderr, ANSI_RESET); // Reset text color
+}
+
+// Enumerates the GGML backends discovered at runtime, i.e. the ones that were
+// actually loaded from the executable's directory (or --backend-path). The names
+// printed here are what --backend accepts. Returns false when nothing was found,
+// which usually means the GGML libraries are missing from that directory.
+static bool print_available_backends()
+{
+    const size_t n_dev = ggml_backend_dev_count();
+    if (n_dev == 0)
+    {
+        print_error_log("Error: no GGML backends found.\n");
+        return false;
+    }
+
+    printf("Available GGML backends (pass a name to --backend):\n");
+    for (size_t i = 0; i < n_dev; ++i)
+    {
+        ggml_backend_dev_props props;
+        ggml_backend_dev_get_props(ggml_backend_dev_get(i), &props);
+
+        printf("  %-10s %-20s %s\n",
+               props.name        ? props.name        : "unknown",
+               props.device_id   ? props.device_id   : "-",
+               props.description ? props.description : "");
+    }
+
+    return true;
 }
 
 struct cli_timing_info
@@ -1645,6 +1675,8 @@ int tool_entry(int argc, char** argv)
             options.model = get_arg_value();
         else if (str_casecmp(arg, "--backend-path") == 0)
             options.backend_path = get_arg_value();
+        else if (str_casecmp(arg, "--list-backends") == 0)
+            options.list_backends = true;
         else if (str_casecmp(arg, "--backend") == 0)
         {
             if (options.backend != "auto")
@@ -2038,6 +2070,15 @@ int tool_entry(int argc, char** argv)
     }
 
     g_quiet_logs = options.quiet;
+
+    // Handled before validate_options(), which requires a model file: this only
+    // needs the backend runtime, so it must work with no other arguments.
+    if (options.list_backends)
+    {
+        cosyvoice_init_backend_from_path(options.backend_path.empty() ? nullptr : options.backend_path.c_str());
+        return print_available_backends() ? 0 : 1;
+    }
+
     if (!validate_options(options))
         return 1;
 
