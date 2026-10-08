@@ -143,6 +143,8 @@ jobs:
                 # Copy ONNX Runtime if frontend is ON
                 if ($f -eq "ON") {
                   Copy-Item "$sharedDeps\onnxruntime\lib\onnxruntime*.dll" "$distDir\" -ErrorAction SilentlyContinue
+                } else {
+                  Remove-Item -Path "$binDir\onnxruntime*.dll" -ErrorAction SilentlyContinue
                 }
                 
                 # Exclude specific files completely
