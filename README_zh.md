@@ -77,7 +77,7 @@
 
 > **系统库：** `icu=ON` 与 `audio=FFMPEG` 变体会动态链接 `libicuuc`/`libicui18n` 与 `libav*`/`libswresample`，这些库已从发布包中剥离——请自行安装（或直接放到可执行文件旁）。`no_icu`、`miniaudio` 与 `no_audio` 变体除 GGML 外无其他依赖。
 
-> **macOS（Metal）上的 GGML 版本要求：** Metal 的 `GGML_OP_PAD` 内核必须支持 beg（左侧）填充。上游在 [ggml-org/llama.cpp#29561](https://github.com/ggml-org/llama.cpp/pull/29561)（提交 `4364bf72`，2026-09-28）中加入了该支持，因此请使用该日期之后构建的 `llama.cpp` release。更旧的 GGML 在任一 beg 填充非零时会把 `GGML_OP_PAD` 判定为不支持，推理会直接中止：覆盖 Flow 解码器 PAD 节点的 CPU 回退并未应用到每一个含 `PAD` 的图——LLM 输入嵌入所在的图就没有。Windows/Linux 无此版本约束，但建议仍保持版本一致。
+> **macOS（Metal）上的 GGML 版本要求：** Metal 的 `GGML_OP_PAD` 内核必须支持 beg（左侧）填充。上游在 [ggml-org/llama.cpp#29561](https://github.com/ggml-org/llama.cpp/pull/29561)（ggml 提交 `46fc5b3b`，2026-09-28）中加入了该支持，因此请使用该日期之后构建的 `llama.cpp` release。更旧的 GGML 在任一 beg 填充非零时会把 `GGML_OP_PAD` 判定为不支持，推理会直接中止：覆盖 Flow 解码器 PAD 节点的 CPU 回退并未应用到每一个含 `PAD` 的图——LLM 输入嵌入所在的图就没有。Windows/Linux 无此版本约束，但建议仍保持版本一致。
 
 > **预编译 GGML CUDA 后端已知问题（Issue [#15](https://github.com/Lourdle/cosyvoice.cpp/issues/15)）：** 有用户反馈使用 `llama.cpp` 预编译发布版的 GGML CUDA 后端时，生成的音频存在噪音。测试确认了预编译 GGML CUDA 版本存在此问题，而自行从源码编译的 GGML 则未出现该问题。如果您在使用 CUDA 后端配合预编译 GGML 时遇到噪音，建议参考本文[构建](#构建)章节，将本项目与 GGML 一同从源码编译。如果不想自行编译，也可以直接改用 **Vulkan 后端**——它与 llama.cpp 的预编译 GGML 发布包配合良好，开箱即用。
 
@@ -214,7 +214,7 @@ cmake -B build -DGGML_VULKAN=ON
 **Metal 后端（`GGML_METAL`）**
 
 - `GGML_METAL` 在 Apple Silicon 上**默认为 ON**（见 ggml 自身 CMakeLists），也可用 `-DGGML_METAL=ON/OFF` 强制指定。
-- GGML 本身对 Metal 无需任何特殊处理：所有平台统一浅克隆（`--depth=1`）最新 master，且不应用任何补丁。此前需要打补丁的 Metal PAD beg-padding 支持已进入上游 [ggml-org/llama.cpp#29561](https://github.com/ggml-org/llama.cpp/pull/29561)，该提交还一并加入了 circular 填充与 permute 源的支持。
+- GGML 本身对 Metal 无需任何特殊处理：所有平台统一浅克隆（`--depth=1`）最新 master，且不应用任何补丁。此前需要打补丁的 Metal PAD beg-padding 支持已进入上游 [ggml-org/llama.cpp#29561](https://github.com/ggml-org/llama.cpp/pull/29561)（ggml 提交 `46fc5b3b`），该提交还一并加入了 circular 填充与 permute 源的支持。
 - 若已有的 `vendor/ggml` 早于该提交，CMake 会发出警告（不中断），因为它的 Metal PAD 内核会导致推理中止——删掉 `vendor/ggml` 并重新运行 CMake 即可拉取新版本。
 
 ```bash
