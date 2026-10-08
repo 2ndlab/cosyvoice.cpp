@@ -214,7 +214,7 @@ Refer to the [GGML documentation](https://github.com/ggml-org/llama.cpp/blob/mas
 **Metal backend (`GGML_METAL`)**
 
 - `GGML_METAL` defaults to **ON on Apple Silicon** (see ggml's own CMakeLists) and can be forced with `-DGGML_METAL=ON/OFF`.
-- GGML itself needs no special handling for Metal: it is shallow-cloned at latest master (`--depth=1`) on every platform and no patch is applied. The Metal PAD beg-padding support that used to be patched in is upstream since [ggml-org/ggml#29561](https://github.com/ggml-org/ggml/pull/29561), which also added circular padding and support for permuted sources.
+- GGML itself needs no special handling for Metal: it is shallow-cloned at latest master (`--depth=1`) on every platform and no patch is applied. The Metal PAD beg-padding support that used to be patched in is upstream since [ggml-org/llama.cpp#29561](https://github.com/ggml-org/llama.cpp/pull/29561), which also added circular padding and support for permuted sources.
 - If an existing `vendor/ggml` predates that commit, CMake warns (without failing) because its Metal PAD kernel would abort inference — delete `vendor/ggml` and re-run CMake to pick up a fresh one.
 
 ```bash
