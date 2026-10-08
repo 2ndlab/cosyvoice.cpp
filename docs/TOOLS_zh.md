@@ -135,8 +135,9 @@ WebUI 是一个现代化的单页应用，提供以下功能：
 
 #### 模型管理
 - **运行时加载模型**：输入 `.gguf` 文件路径，选择后端和线程数，点击「Load Model」加载。
-- **卸载模型**：释放模型内存，无需重启服务端。
+- **卸载模型**：释放模型内存，无需重启服务端；若有正在进行的合成会先停止并等待在途请求结束。
 - **参数配置**：LLM/DiT KV cache 类型、buffer 策略、最大 LLM 长度、Flash Attention 开关、DiT KV cache 槽位数——可在加载前配置。
+- **严格 seed 模式**：在 Advanced Model Config 面板中切换严格 seed 遵循（相同 sampler seed 生成完全一致的音频）；初始值反映服务端 `--strict-seed`，在下一次加载模型时生效。
 - **动态后端选择**：启动时自动探测可用的 GGML 后端（Auto / CPU / CUDA / Vulkan / Metal）。
 
 #### 音色管理
@@ -151,6 +152,7 @@ WebUI 是一个现代化的单页应用，提供以下功能：
 #### TTS 生成
 - **文本输入**：可选择音色、模式（zero-shot / instruct / cross-lingual）和输出格式。
 - **流式 TTS**：开启流式模式后，音频块到达时即可渐进播放。可配置每个块的 token 数。
+- **停止生成**：生成过程中显示 Stop 按钮，点击即可中止合成（已流出的音频保留，可继续播放/下载）。
 - **高级采样控制**：temperature、top-k、top-p、重复惩罚窗口、tau-r、随机种子（支持锁定）。
 - **Instruct 模式**：输入指令控制说话风格（需要模型支持 instruct）。
 - **音频播放**：生成的音频直接在浏览器中播放，配有波形可视化。流式模式使用 MediaSource 实现真正的渐进式播放。
@@ -169,9 +171,10 @@ WebUI 是一个现代化的单页应用，提供以下功能：
 | `--help, -h` | 显示帮助并退出。 |
 | `--model, -m <file>` | CosyVoice 模型文件（`.gguf`）。 |
 | `--backend-path <dir>` | GGML backend 所在目录。如果不指定，默认加载程序所在目录的 GGML 后端。 |
-| `--backend <name>` | GGML 后端名称（如 `cpu`、`cuda0`、`vulkan`、`metal`）。默认 `auto`（自动选择最佳后端）。与 `--cpu`/`--cuda` 互斥。 |
+| `--backend <name>` | GGML 后端设备名（如 `cpu`、`cuda0`、`mtl0`；用 `cosyvoice-cli --list-backends` 查看本机实际可用的名字）。默认 `auto`（自动选择最佳后端）。与 `--cpu`/`--cuda` 互斥。 |
 | `--cpu` | 使用 CPU 后端（等价于 `--backend cpu`）。与 `--cuda`/`--backend` 互斥。 |
 | `--cuda` | 使用 CUDA 后端（等价于 `--backend cuda0`）。与 `--cpu`/`--backend` 互斥。 |
+| `--simd-level <auto\|scalar\|sse42\|avx\|avx2\|avx10-256\|avx512>` | CPU DSP SIMD 层级封顶（仅 x86-64）。`scalar` 运行时禁用 SIMD；更高的层级放行该级及以下全部层级。默认：`auto`（或环境变量 `COSYVOICE_SIMD_LEVEL`）。非 x86 构建无此选项。 |
 | `--served-model-name <name>` | API/WebUI 对外模型名。如果省略，优先使用 `cosyvoice_get_architecture()` 返回的模型架构名；否则从文件名推导。 |
 | `--host <host>` | 监听地址，默认 `127.0.0.1`。 |
 | `--port <port>` | 监听端口，默认 `8080`。 |
@@ -213,17 +216,21 @@ WebUI 是一个现代化的单页应用，提供以下功能：
 | `--max-llm-len <value>` | LLM 最大序列长度，默认 `2048`。 |
 | `--threads, -j <value>` | CPU 线程数，默认 `0`（硬件并发数）。 |
 | `--concurrency, -c <value>` | 并发请求槽数，默认 `1`（仅 API 模式；WebUI 模式始终为单槽）。 |
-| `--inference-buffer-policy <shared\|balanced\|dedicated>` | 推理缓冲区策略，默认 `balanced`。 |
+| `--inference-buffer-policy <shared\|balanced\|dedicated>` | 推理缓冲区策略，默认 `dedicated`。 |
 | `--llm-kv-cache-type <f32\|f16\|q8_0\|q5_1\|q5_0\|q4_1\|q4_0\|k=<type>,v=<type>[,fallback=<type>]>` | LLM KV cache 类型。单一类型（如 `q8_0`）为 K 和 V 使用相同格式。默认 `k=q8_0,v=q4_0,fallback=q8_0`。 |
 | `--dit-kv-cache-type <f32\|f16\|q8_0\|q5_1\|q5_0\|q4_1\|q4_0\|k=<type>,v=<type>[,fallback=<type>]>` | DiT（flow matching）KV cache 类型。格式同 LLM KV cache。默认 `k=q8_0,v=q4_0,fallback=q8_0`。 |
 | `--dit-kv-fixed-slots <value>` | 固定（不可卸载）DiT KV cache 槽位数。每个固定步独占一个设备槽位，映射到扩散步的尾部。默认 `0`（禁用）。 |
-| `--dit-kv-offloadable-slots <value>` | 可 CPU 卸载的 DiT KV cache 槽位数。所有可卸载步共享一个设备临时槽位，每个槽位各对应一个 CPU 缓冲区来拷贝 KV。默认 `0`（禁用）。值为 `1` 时归一化为固定槽位；`fixed + offloadable` 会被裁剪到不超过扩散步数（10）。 |
+| `--dit-kv-offloadable-slots <value>` | 可 CPU 卸载的 DiT KV cache 槽位数。所有可卸载步共享一个设备临时槽位，每个槽位各对应一个 CPU 缓冲区来拷贝 KV。默认 `0`（禁用）。值为 `1` 时归一化为固定槽位；`fixed + offloadable` 会被裁剪到不超过扩散步数。 |
+| `--dit-kv-actual-fixed-slots <value>` | 支撑固定 DiT KV 槽位的物理设备槽位数。相邻固定步分组共享一份缓存，减少常驻 DiT KV 内存。`0` = 不共享（每个固定步一个槽位）；裁剪到 `[1, --dit-kv-fixed-slots]`。默认 `0`。 |
+| `--dit-kv-actual-offloadable-slots <value>` | 支撑可卸载 DiT KV 槽位的物理 CPU 缓冲区数量。相邻可卸载步分组共享一个缓冲区（组首步拷入、组尾步拷出）。`0` = 不共享；裁剪到 `[1, --dit-kv-offloadable-slots]`。默认 `0`。 |
 | `--dit-kv-cache-length <value>` | DiT KV cache 最大序列长度，默认 `0`（自动，为 `max-llm-len * 10`）。 |
+| `--diffusion-steps <value>` | 每个 chunk 的流匹配扩散步数。`0`/负数使用模型的 `decoder.diffusion_steps` 元数据（默认 `10`）；上限裁剪到 `50`。 |
 | `--llm-flash-attn <0\|1>` | 启用/禁用 LLM Flash Attention。默认 `1`（启用）。 |
 | `--flow-flash-attn <0\|1>` | 启用/禁用 Flow/DiT Flash Attention。默认 `1`（启用）。 |
 | `--stream` | 默认对所有请求启用流式 TTS（WebUI 和 API 模式均生效）。 |
 | `--chunk-tokens <value>` | 每个流式块的 token 数。chunk 越小，首包延迟越低，但上下文调度开销越大，RTF 越高；chunk 越大，RTF 越低，但首包延迟越高。默认：模型定义（因模型而异）。 |
 | `--seed <value>` | 默认随机种子（当请求未传 seed 时使用）。 |
+| `--strict-seed <0\|1>` | 严格保证相同 sampler seed 生成完全一致的音频；关闭可省去一个小的 prefill 通道、速度略快。默认 `1`（启用）。 |
 
 ### 采样默认值覆盖（服务级）
 
@@ -310,13 +317,15 @@ WebUI 暴露以下 REST 接口，由前端 JavaScript 调用：
   "model_loaded": true,
   "model": "cosyvoice-3",
   "sample_rate": 24000,
+  "strict_seed": true,
   "max_llm_len": 2048,
   "k_cache_type": "Q8_0",
   "v_cache_type": "Q4_0",
-  "buffer_policy": "balanced",
+  "buffer_policy": "dedicated",
   "llm_use_flash_attn": true,
   "flow_use_flash_attn": true,
   "model_arch": "cosyvoice3-2512",
+  "diffusion_steps": 10,
   "frontend_available": false,
   "speakers": ["alloy", "nova"]
 }
@@ -390,12 +399,19 @@ JSON 请求体：
 
 当 `stream` 为 `true`（或服务端以 `--stream` 启动）时，响应以 HTTP 分块传输方式返回。音频块在生成过程中逐步传输。服务端层面对所有输出格式均支持流式。通过 WebUI 使用浏览器播放时，需要 MP3、Opus、AAC 或 FLAC（MediaSource API 不支持 WAV 渐进播放）。当 `stream` 为 `false`（默认）时，完整音频缓存后一次性返回。
 
+#### `POST /tts/stop`
+
+停止当前正在进行的 TTS 生成（仅 WebUI 模式）。对模型槽位发起协作式停止请求，并阻塞等待生成真正停止后返回。流式响应中已传出的音频仍可播放；WebUI 在生成过程中显示 Stop 按钮，中止后已生成的部分保留在历史记录中。
+
+成功返回 `200` 和 `{"success": true}`；未加载模型时返回 `409` 和 `{"error": "No model loaded"}`。
+
 #### `GET /model/defaults`
 
 返回模型默认参数 JSON（字段集因已加载模型而异）：
 ```json
 {
   "max_llm_len": 2048,
+  "strict_seed_mode": true,
   "temperature": 1.0,
   "top_k": 50,
   "top_p": 0.9,
@@ -404,7 +420,10 @@ JSON 请求体：
   "default_dit_v_cache_type": "q4_0",
   "default_dit_kv_fixed_slots": 1,
   "default_dit_kv_offloadable_slots": 0,
+  "default_dit_kv_actual_fixed_slots": 0,
+  "default_dit_kv_actual_offloadable_slots": 0,
   "default_dit_kv_cache_length": 20480,
+  "default_diffusion_steps": 0,
   …
 }
 ```
@@ -420,30 +439,38 @@ DiT KV cache 默认值从加载后的生效配置中获取。`chunk_tokens` 反�
   "backend": "auto",
   "n_threads": 8,
   "max_llm_len": 2048,
-  "buffer_policy": "balanced",
+  "buffer_policy": "dedicated",
   "k_cache_type": "q8_0",
   "v_cache_type": "q4_0",
   "llm_use_flash_attn": true,
   "flow_use_flash_attn": true,
+  "strict_seed_mode": true,
   "dit_kv_cache_type": "k=q8_0,v=q4_0,fallback=q8_0",
   "dit_kv_fixed_slots": 0,
   "dit_kv_offloadable_slots": 0,
+  "dit_kv_actual_fixed_slots": 0,
+  "dit_kv_actual_offloadable_slots": 0,
   "dit_kv_cache_length": 0,
+  "diffusion_steps": 0,
   "chunk_tokens": 0
 }
 ```
 
 其他字段：
 - `llm_use_flash_attn`、`flow_use_flash_attn`：`true`/`false`，Flash Attention 开关。
+- `strict_seed_mode`：`true`/`false`，严格 seed 遵循开关（相同 sampler seed 生成完全一致的音频）。缺省为服务端 `--strict-seed` 的值；生效值通过 `GET /model/defaults`（`strict_seed_mode`）与 `GET /status`（`strict_seed`）返回。该标志在加载时固定——修改需卸载并重新加载模型。
 - `dit_kv_cache_type`：DiT KV cache 类型（格式同 `k_cache_type`）。
 - `dit_kv_fixed_slots`：固定 DiT KV cache 槽位数（0 = 禁用）。每个固定步独占一个设备槽位，映射到扩散步尾部。
-- `dit_kv_offloadable_slots`：可 CPU 卸载的 DiT KV cache 槽位数（0 = 禁用）。所有可卸载步共享一个设备临时槽位，各配一个 CPU 缓冲区。`1` 归一化为固定槽位；`fixed + offloadable` 裁剪到不超过 10。
+- `dit_kv_offloadable_slots`：可 CPU 卸载的 DiT KV cache 槽位数（0 = 禁用）。所有可卸载步共享一个设备临时槽位，各配一个 CPU 缓冲区。`1` 归一化为固定槽位；`fixed + offloadable` 裁剪到不超过扩散步数。
+- `dit_kv_actual_fixed_slots`：支撑固定槽位的物理设备槽位数（0 = 不共享）；相邻固定步共享一份缓存。裁剪到 `[1, dit_kv_fixed_slots]`。
+- `dit_kv_actual_offloadable_slots`：支撑可卸载槽位的物理 CPU 缓冲区数（0 = 不共享）；相邻可卸载步共享一个缓冲区。裁剪到 `[1, dit_kv_offloadable_slots]`。
 - `dit_kv_cache_length`：DiT KV cache 最大序列长度（0 = 自动，为 `max_llm_len * 10`）。
+- `diffusion_steps`：流匹配扩散步数。`0`/负数沿用模型的 `decoder.diffusion_steps` 元数据（默认 `10`）；正数裁剪到上限 `50`。响应中包含实际生效的 `diffusion_steps`。
 - `chunk_tokens`：每个流式块的 token 数（0 = 模型默认）。
 
 #### `POST /model/unload`
 
-卸载当前模型（无需 JSON 请求体）。
+卸载当前模型（无需 JSON 请求体）。若有正在进行的 TTS 生成，服务端会先发出停止请求，并等待所有在途 `/tts` 请求（包括流式 provider）结束后再释放模型资源。
 
 #### `GET /frontend/model`
 
@@ -709,9 +736,11 @@ cosyvoice-cli \
 - `--interactive`：进入交互式 REPL 模式。
 - `--model, -m <file>`：TTS 使用的 CosyVoice 模型文件（`.gguf`）。
 - `--backend-path <dir>`：GGML backend 所在目录。如果不指定此选项，将默认加载程序所在目录的 GGML 后端。
-- `--backend <name>`：GGML 后端名称（如 `cpu`、`cuda0`、`vulkan`、`metal`）。默认 `auto`（自动选择最佳后端）。与 `--cpu`/`--cuda` 互斥。
+- `--backend <name>`：GGML 后端设备名（如 `cpu`、`cuda0`、`mtl0`；用 `cosyvoice-cli --list-backends` 查看本机实际可用的名字）。默认 `auto`（自动选择最佳后端）。与 `--cpu`/`--cuda` 互斥。
 - `--cpu`：使用 CPU 后端（等价于 `--backend cpu`）。与 `--cuda`/`--backend` 互斥。
 - `--cuda`：使用 CUDA 后端（等价于 `--backend cuda0`）。与 `--cpu`/`--backend` 互斥。
+- `--list-backends`：列出运行时发现的 GGML 后端（即实际从可执行文件所在目录或 `--backend-path` 加载到的那些）后退出。打印出的名字正是 `--backend` 接受的值，可用来确认 GGML 库放对了位置且版本足够新；Server 侧通过 `GET /backends` 提供同样的列表。
+- `--simd-level <auto|scalar|sse42|avx|avx2|avx10-256|avx512>`：CPU DSP SIMD 层级封顶（仅 x86-64）。`scalar` 运行时禁用 SIMD，无需重编；更高的层级放行该级及以下全部层级。默认：`auto`（或环境变量 `COSYVOICE_SIMD_LEVEL`）。同样作用于 `--frontend-only` 的前端 DSP 路径。非 x86 构建无此选项。
 - `--text, -t <text>`：待合成文本。
 - `--output, -o <file>`：输出音频文件路径。
   - 常规构建：输出格式由文件扩展名决定。
@@ -719,16 +748,20 @@ cosyvoice-cli \
 - `--speed, -s <value>`：语速倍率，默认 `1.0`，必须大于 `0`。
 - `--seed <value>`：采样与内部噪声生成的随机种子，必须是无符号 32 位整数；默认随机。
 - `--seed-policy <auto|fixed|random>`：seed 策略。`auto` 表示给出 `--seed` 时按 `fixed`、否则按 `random`。默认 `auto`。`--frontend-only` 模式下忽略（会打印警告）。
+- `--strict-seed <0|1>`：严格保证相同 sampler seed 生成完全一致的音频，代价是多一次较小的 prefill 通道；关闭后 prefill 略快，但不再严格保证 seed 可复现。默认 `1`（启用）。
 - `--max-llm-len <value>`：LLM 最大输入 token 数（`n_max_seq`），默认 `2048`，必须为正整数。
 - `--threads, -j <value>`：模型推理使用的 CPU 线程数，必须是无符号 32 位整数；默认 `0`（使用当前硬件并发数）。
 - `--llm-kv-cache-type <f32|f16|q8_0|q5_1|q5_0|q4_1|q4_0|k=<type>,v=<type>[,fallback=<type>]>`：LLM KV cache 类型。单一类型（如 `q8_0`）为 K 和 V 使用相同格式。可使用独立 K/V 类型（如 `k=q8_0,v=q4_0`）指定不同格式。默认 `k=q8_0,v=q4_0,fallback=q8_0`。
-- `--inference-buffer-policy <shared|balanced|dedicated>`：推理缓冲区策略。仅在交互模式下生效；非交互模式始终使用 `shared` 以最小化内存占用并获得最快的单次合成速度。默认 `balanced`。
+- `--inference-buffer-policy <shared|balanced|dedicated>`：推理缓冲区策略。仅在交互模式下生效；非交互模式始终使用 `shared` 以最小化内存占用并获得最快的单次合成速度。默认 `dedicated`。
 - `--mode <zero-shot|instruct|cross-lingual>`：TTS 模式。默认按 `--instruction` 自动判定。
 - `--instruction, -i <text>`：instruct 模式指令文本。
 - `--dit-kv-cache-type <f32|f16|q8_0|q5_1|q5_0|q4_1|q4_0|k=<type>,v=<type>[,fallback=<type>]>`：DiT KV cache 类型（仅交互模式）。格式同 `--llm-kv-cache-type`。默认 `k=q8_0,v=q4_0,fallback=q8_0`。
 - `--dit-kv-fixed-slots <value>`：固定（不可卸载）DiT KV cache 槽位数（仅交互模式）。每个固定步独占一个设备槽位，映射到扩散步尾部。默认 `0`（禁用）。
-- `--dit-kv-offloadable-slots <value>`：可 CPU 卸载的 DiT KV cache 槽位数（仅交互模式）。所有可卸载步共享一个设备临时槽位，每槽各对应一个 CPU 缓冲区。默认 `0`（禁用）。值为 `1` 归一化为固定槽位；`fixed + offloadable` 裁剪到不超过 10（扩散步数）。
+- `--dit-kv-offloadable-slots <value>`：可 CPU 卸载的 DiT KV cache 槽位数（仅交互模式）。所有可卸载步共享一个设备临时槽位，每槽各对应一个 CPU 缓冲区。默认 `0`（禁用）。值为 `1` 归一化为固定槽位；`fixed + offloadable` 裁剪到不超过扩散步数。
+- `--dit-kv-actual-fixed-slots <value>`：支撑固定 DiT KV 槽位的物理设备槽位数（仅交互模式）。相邻固定步分组共享一份缓存，减少常驻 DiT KV 内存。`0` = 不共享；裁剪到 `[1, --dit-kv-fixed-slots]`。默认 `0`。
+- `--dit-kv-actual-offloadable-slots <value>`：支撑可卸载 DiT KV 槽位的物理 CPU 缓冲区数（仅交互模式）。相邻可卸载步分组共享一个缓冲区。`0` = 不共享；裁剪到 `[1, --dit-kv-offloadable-slots]`。默认 `0`。
 - `--dit-kv-cache-length <value>`：DiT KV cache 最大序列长度（仅交互模式）。默认 `0`（自动，为 `max-llm-len * 10`）。
+- `--diffusion-steps <value>`：每个 chunk 的流匹配扩散步数。`0`/负数使用模型的 `decoder.diffusion_steps` 元数据（默认 `10`）；上限裁剪到 `50`。
 - `--stream`：在交互模式下启用流式播放（生成过程中渐进播放音频）。
 - `--chunk-tokens <value>`：每个流式块的 token 数（仅交互模式）。chunk 越小，首包延迟越低，但上下文调度开销越大，RTF 越高；chunk 越大，RTF 越低，但首包延迟越高。默认：模型定义。
 - `--llm-flash-attn <0|1>`：启用/禁用 LLM Flash Attention。默认 `1`（启用）。
@@ -777,8 +810,7 @@ cosyvoice-cli \
 运行日志：
 - 模型加载前会先打印基础请求信息（模型路径、模式、提示源、输出路径、语速、解析后的 CPU 线程数、seed 来源）。
 - 模型加载阶段会显示转圈动画（`| / - \\`）。
-- 后端信息现在包含 UMA（统一内存架构）检测结果和生效的缓冲策略。
-- 当检测到 UMA 且请求的缓冲策略为 `balanced` 时，库会自动切换为 `dedicated` 以获得更好性能；此时会打印日志提示。
+- 后端信息现在包含 UMA（统一内存架构）检测结果和生效的缓冲策略。UMA 检测结果仅作信息展示，不会改变缓冲策略。
 - 默认输出为简洁分区样式。
 - `--verbose` 显示完整运行细节（含上下文/内存明细与完整阶段耗时）。
 - `--quiet` 不显示运行信息和耗时（错误信息仍会输出）。
@@ -812,14 +844,19 @@ cosyvoice-cli \
 | `--max-llm-len` | `2048` | CLI |
 | `--threads` | `0`（硬件并发数） | CLI |
 | `--llm-kv-cache-type` | `k=q8_0,v=q4_0,fallback=q8_0` | CLI |
-| `--inference-buffer-policy` | `balanced`（交互模式）/ `shared`（非交互模式） | CLI |
+| `--inference-buffer-policy` | `dedicated`（交互模式）/ `shared`（非交互模式） | CLI |
 | `--seed` | 随机 | 运行时 |
+| `--strict-seed` | `1`（启用） | CLI |
+| `--simd-level` | `auto`（或 `COSYVOICE_SIMD_LEVEL`） | CLI |
 | `--stream` | `false` | CLI |
 | `--chunk-tokens` | 模型定义 | 模型 |
 | `--dit-kv-cache-type` | `k=q8_0,v=q4_0,fallback=q8_0` | CLI |
 | `--dit-kv-fixed-slots` | `0`（禁用） | CLI |
 | `--dit-kv-offloadable-slots` | `0`（禁用） | CLI |
+| `--dit-kv-actual-fixed-slots` | `0`（不共享） | CLI |
+| `--dit-kv-actual-offloadable-slots` | `0`（不共享） | CLI |
 | `--dit-kv-cache-length` | `0`（自动，`max-llm-len * 10`） | CLI |
+| `--diffusion-steps` | `0`（取模型 `decoder.diffusion_steps` 元数据，默认 `10`；上限 `50`） | CLI |
 | `--llm-flash-attn` | `1`（启用） | CLI |
 | `--flow-flash-attn` | `1`（启用） | CLI |
 | `temperature/top_k/top_p/win_size/tau_r/min/max_token_text_ratio` | 模型元数据 | 模型 |

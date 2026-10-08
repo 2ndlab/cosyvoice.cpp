@@ -56,7 +56,7 @@
 | **KV Cache 量化** | 通过 `--llm-kv-cache-type` 降低 LLM 内存占用（f32 / f16 / q8_0 / q5_1 / q4_0 / ...）。支持非对称量化，K 和 V 可独立指定类型（如 `k=q8_0,v=q4_0`）。 |
 | **Prompt Speech 复用** | 一次编码参考音色，后续合成直接复用，无需再跑 ONNX |
 | **音频后端可切换** | 可选 MINIAUDIO（默认）或 FFMPEG，支持 WAV、MP3、AAC、FLAC、OPUS、M4A |
-| **UMA 自动检测** | 自动检测统一内存架构并调整 buffer policy，优化吞吐 |
+| **UMA 检测** | 检测统一内存架构并报告结果（如 `uma: yes/no`）供参考；不会改变 buffer policy |
 | **推理 Buffer 策略** | `shared` / `balanced` / `dedicated` 三种模式，权衡内存与吞吐 |
 | **文本拆分与淡入** | 长文本智能拆分与可配置的输出淡入后处理 |
 | **多后端支持** | CPU、CUDA、Metal、Vulkan、SYCL（见[后端测试情况](#后端测试情况)） |
@@ -67,11 +67,17 @@
 
 ### 预编译发布版 (Releases)
 
-**macOS (arm64) 的发布包已自带（捆绑）打过补丁的 GGML 后端库**（包括应用了 Metal PAD 补丁的构建，llama.cpp 的发布版没有该补丁），可直接运行。其他平台：
+所有平台的发布包都只包含 `cosyvoice` 可执行文件与前端/音频依赖，**不捆绑 GGML**——GGML 从 `llama.cpp` release 获取：
 1. 从本仓库的 [Releases 页面](https://github.com/Lourdle/cosyvoice.cpp/releases) 下载 `cosyvoice-cli` 或 `cosyvoice-server`。
 2. 下载与硬件和操作系统匹配的 `llama.cpp` release。
-3. 将 `cosyvoice` 可执行文件放到包含 GGML 后端共享库（`ggml.dll`、`ggml-cuda.dll` 等）的同一目录。
-4. 在该目录下运行。
+3. 把该 release 中的**全部** GGML 库拷贝到 `cosyvoice` 可执行文件所在目录——`ggml*.dll` / `libggml*.so*` / `libggml*.dylib`，**包含 CPU 变体模块**（`ggml-cpu-<isa>.dll`、`libggml-cpu-<isa>.so`）。后端在运行时从可执行文件所在目录被发现，缺少变体模块会导致二进制没有可用的 CPU 后端。
+4. 在该目录下运行。macOS 上请用 `cp -a`（或直接解压）拷贝 dylib，以保留带版本号的符号链接链——`libggml.dylib` 是指向 `libggml.<版本>.dylib` 的符号链接。
+
+自检方法：运行 `cosyvoice-cli --list-backends`，它会列出实际从该目录加载到的后端，打印出的名字正是 `--backend` 接受的值。如果列表为空、或缺少你要用的 GPU 后端，说明 GGML 库没放对位置或版本太老。
+
+> **系统库：** `icu=ON` 与 `audio=FFMPEG` 变体会动态链接 `libicuuc`/`libicui18n` 与 `libav*`/`libswresample`，这些库已从发布包中剥离——请自行安装（或直接放到可执行文件旁）。`no_icu`、`miniaudio` 与 `no_audio` 变体除 GGML 外无其他依赖。
+
+> **macOS（Metal）上的 GGML 版本要求：** Metal 的 `GGML_OP_PAD` 内核必须支持 beg（左侧）填充。上游在 [ggml-org/llama.cpp#29561](https://github.com/ggml-org/llama.cpp/pull/29561)（ggml 提交 `46fc5b3b`，2026-09-28）中加入了该支持，因此请使用该日期之后构建的 `llama.cpp` release。更旧的 GGML 在任一 beg 填充非零时会把 `GGML_OP_PAD` 判定为不支持，推理会直接中止：覆盖 Flow 解码器 PAD 节点的 CPU 回退并未应用到每一个含 `PAD` 的图——LLM 输入嵌入所在的图就没有。Windows/Linux 无此版本约束，但建议仍保持版本一致。
 
 > **预编译 GGML CUDA 后端已知问题（Issue [#15](https://github.com/Lourdle/cosyvoice.cpp/issues/15)）：** 有用户反馈使用 `llama.cpp` 预编译发布版的 GGML CUDA 后端时，生成的音频存在噪音。测试确认了预编译 GGML CUDA 版本存在此问题，而自行从源码编译的 GGML 则未出现该问题。如果您在使用 CUDA 后端配合预编译 GGML 时遇到噪音，建议参考本文[构建](#构建)章节，将本项目与 GGML 一同从源码编译。如果不想自行编译，也可以直接改用 **Vulkan 后端**——它与 llama.cpp 的预编译 GGML 发布包配合良好，开箱即用。
 
@@ -205,20 +211,16 @@ cmake -B build -DGGML_VULKAN=ON
 
 完整后端选项列表及推荐配置请参考 [GGML 文档](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md)。
 
-**Metal 后端（`GGML_METAL`）特殊处理**
-
-`cmake/patches/ggml-metal-pad-beg.patch`（Metal PAD beg-padding 补丁）是针对特定 ggml 快照编写的。若 Metal 开启而 ggml 漂移到最新 master，`git apply` 会因行偏移/内核重写而失败，从而静默禁用 Metal PAD 支持。为保证补丁始终有效，构建系统会对 ggml 固定提交号——但仅在 Metal 构建时生效，其他后端仍像以前一样使用最新 ggml。
+**Metal 后端（`GGML_METAL`）**
 
 - `GGML_METAL` 在 Apple Silicon 上**默认为 ON**（见 ggml 自身 CMakeLists），也可用 `-DGGML_METAL=ON/OFF` 强制指定。
-- **Metal 构建**（Apple Silicon 默认）：GGML 被固定到提交 `e91ded11bdcd78c42f9c8d3978ff6686eb4c1226`（v0.23.0，可通过 `cmake/Dependencies.cmake` 中的 `GGML_PINNED_COMMIT` 配置）。CMake 会在克隆后自动 checkout 该提交；若已有 `vendor/ggml` 检出偏离固定提交，仅警告而不中断；并幂等应用 `cmake/patches/ggml-metal-pad-beg.patch`（已应用则跳过）。
-- **非 Metal 构建**：行为不变——浅克隆（`--depth=1`）最新 master，不应用任何补丁。
+- GGML 本身对 Metal 无需任何特殊处理：所有平台统一浅克隆（`--depth=1`）最新 master，且不应用任何补丁。此前需要打补丁的 Metal PAD beg-padding 支持已进入上游 [ggml-org/llama.cpp#29561](https://github.com/ggml-org/llama.cpp/pull/29561)（ggml 提交 `46fc5b3b`），该提交还一并加入了 circular 填充与 permute 源的支持。
+- 若已有的 `vendor/ggml` 早于该提交，CMake 会发出警告（不中断），因为它的 Metal PAD 内核会导致推理中止——删掉 `vendor/ggml` 并重新运行 CMake 即可拉取新版本。
 
 ```bash
 # 强制开启/关闭 Metal（Apple Silicon 默认开启）
 cmake -B build -DGGML_METAL=ON
 ```
-
-如需升级 Metal 构建使用的 ggml：先更新 `cmake/Dependencies.cmake` 中的 `GGML_PINNED_COMMIT`，并按照该文件中的说明针对新代码树重新生成补丁，再端到端验证 Metal 合成效果。
 
 **依赖路径选项**
 
@@ -359,17 +361,25 @@ CPU 侧 DSP 路径（FFT、mel/频谱 kernel、log/sincos 数学助手）全部�
 - 层级：**标量**、**SSE4.2（+FMA3）**、**AVX**、**AVX2**、**AVX-512**（需 F+BW+DQ+VL 与操作系统启用配套状态）、**AVX10.1**——Panther Lake / Nova Lake 及以后的型号经 CPUID leaf 0x24H 独立检测；其 512 位模式直接复用 AVX-512 层，只有 256 位类是独立层。无需任何配置：枚举出 AVX10 的 CPU 会自动获得对应路径。
 - ARM64（含 Android）上，SSE4.2+FMA3 层可通过 [SIMDe](#simdesimd-everywhere) 在 NEON 上模拟；没有 SIMDe 时自动降级为纯标量。
 
-构建期开关（默认全部 ON）：`-DCOSYVOICE_NO_SIMD=ON` 关闭全部 SIMD；`-DCOSYVOICE_HAS_SCALAR`、`_SSE42`、`_AVX`、`_AVX2`、`_AVX512`、`_AVX10_1` 逐类关闭（关闭 SSE4.2 会级联关闭更高的 legacy 层；AVX10-256 层需要工具链认识其编译参数，否则静默跳过）。Debug 构建启动时会打印检测到的能力集合。层级布局、分派规则与 AVX10 策略的完整细节见 [docs/SIMD_zh.md](docs/SIMD_zh.md)。
+构建期开关（默认全部 ON）：`-DCOSYVOICE_NO_SIMD=ON` 关闭全部 SIMD；`-DCOSYVOICE_HAS_SCALAR`、`_SSE42`、`_AVX`、`_AVX2`、`_AVX512`、`_AVX10_1` 逐类关闭（关闭 SSE4.2 会级联关闭更高的 legacy 层；AVX10-256 层需要工具链认识其编译参数，否则静默跳过）。Debug 构建启动时会打印检测到的能力集合。
+
+运行时控制（仅 x86-64）：`cosyvoice.h` 中的 `cosyvoice_get_simd_info()` /
+`cosyvoice_set_simd_level()` 可查询检测到的能力，并在运行时给分派层级封顶
+（例如调试时强制标量、或禁用 AVX-512 规避降频），无需重新编译；工具支持
+`--simd-level` 参数，环境变量 `COSYVOICE_SIMD_LEVEL`（库加载时读取一次）对
+所有接入方生效——见 [docs/SIMD_zh.md](docs/SIMD_zh.md)——运行时控制 API。
+层级布局、分派规则与 AVX10 策略的完整细节见
+[docs/SIMD_zh.md](docs/SIMD_zh.md)。
 
 ## 流式 TTS 与 DiT KV 缓存
 
 流式 TTS 在合成过程中通过回调函数逐段交付音频，无需等待完整语句生成完毕即可开始播放，从而实现实时播放与更低的主观延迟。
 
-每个块都要跑完 DiT 的 10 步扩散——若无缓存，每个新块的每一步都会对此前已产出的整个音频序列重算注意力。**DiT KV 缓存**按扩散步保存已产出位置的注意力 key/value（每个扩散步一个缓存槽位），新块只计算自己新增的位置：每个位置在每个步上只计算一次，之后的所有块直接复用。
+每个块都要跑完 DiT 的扩散步（默认 10 步）——若无缓存，每个新块的每一步都会对此前已产出的整个音频序列重算注意力。**DiT KV 缓存**按扩散步保存已产出位置的注意力 key/value（每个扩散步一个缓存槽位），新块只计算自己新增的位置：每个位置在每个步上只计算一次，之后的所有块直接复用。
 
 ### 槽位组织
 
-DiT KV 缓存按 **槽位（slot）** 组织，每个槽位对应一个扩散步的 KV 缓存。扩散步数固定为 10，因此设备槽位至多 10 个。
+DiT KV 缓存按 **槽位（slot）** 组织，每个槽位对应一个扩散步的 KV 缓存。默认 10 个扩散步，因此至多 10 个设备槽位（每步一个）。
 
 槽位分为三类：
 
@@ -379,7 +389,9 @@ DiT KV 缓存按 **槽位（slot）** 组织，每个槽位对应一个扩散步
 | **可卸载** | 不使用时卸载到 CPU | 节省设备显存，但增加传输开销 |
 | **不缓存** | 不存储 | 每步全量重算注意力，无额外内存开销 |
 
-**步-槽位映射。** 扩散步按顺序排列——不缓存步在最前，然后是可卸载步，最后是固定步。固定步各独占一个设备槽位；可卸载步共享同一个设备临时槽（设备槽 0），并各自持有一个 CPU 缓冲区来拷贝 KV。可卸载槽数恰好为 1 时会被归一化为固定槽位（`offloadable=1 → fixed+1`），且两个数量都会被裁剪，保证 `fixed + offloadable` 不超过 10 个扩散步。总缓存步数 = `固定 + 可卸载`，其余步全量重算。内部槽位/调度布局详见 [docs/API_zh_cosyvoice.md — DiT KV 缓存概念](docs/API_zh_cosyvoice.md#dit-kv-缓存概念)。
+**步-槽位映射。** 扩散步按顺序排列——不缓存步在最前，然后是可卸载步，最后是固定步。固定步各独占一个设备槽位；可卸载步共享同一个设备临时槽（设备槽 0），并各自持有一个 CPU 缓冲区来拷贝 KV。可卸载槽数恰好为 1 时会被归一化为固定槽位（`offloadable=1 → fixed+1`），且两个数量都会被裁剪，保证 `fixed + offloadable` 不超过扩散步数。总缓存步数 = `固定 + 可卸载`，其余步全量重算。内部槽位/调度布局详见 [docs/API_zh_cosyvoice.md — DiT KV 缓存概念](docs/API_zh_cosyvoice.md#dit-kv-缓存概念)。
+
+相邻扩散步也可通过 `--dit-kv-actual-fixed-slots` / `--dit-kv-actual-offloadable-slots` **共享**一份物理缓存：固定步与可卸载步各自被划分为该数量的分组，每组共享一个设备槽位 / CPU 缓冲区，缓存缩小为名义值的 `实际/名义`。组内各步读取的历史为组内最后写入者的结果（一种很小的近似），且 CPU 往返从每步一次变为每组一次。
 
 KV 缓存占用较大，因此默认 0 个槽位（全部 10 步全量重算）。启用缓存后，若序列长度超过配置的缓存长度，会丢弃部分位置——推理可正常继续，但输出质量可能下降。可卸载槽位需要和设备与 CPU 间传输数据，可能无法带来速度提升，甚至比全量重算更慢。
 
@@ -392,7 +404,11 @@ DiT KV 缓存参数通过 CLI/server 的 `--dit-kv-*` 参数配置（context 参
 - `--dit-kv-cache-type`：缓存存储格式——`f32`/`f16`/`q8_0`/`q5_1`/`q5_0`/`q4_1`/`q4_0`，或 K/V 独立指定的非对称格式（`k=<type>,v=<type>[,fallback=<type>]`，与 `--llm-kv-cache-type` 同风格）。
 - `--dit-kv-fixed-slots`：常驻设备内存的槽位数。默认：`0`。
 - `--dit-kv-offloadable-slots`：可卸载到 CPU 的槽位数。默认：`0`。
+- `--dit-kv-actual-fixed-slots`：支撑固定槽位的物理设备槽位数（相邻步共享一份）。`0` = 不共享。默认：`0`。
+- `--dit-kv-actual-offloadable-slots`：支撑可卸载槽位的物理 CPU 缓冲区数（相邻步共享一个）。`0` = 不共享。默认：`0`。
 - `--dit-kv-cache-length`：缓存保留的最大序列位置数。默认：`0` = 最大 LLM 长度 × 10。
+
+扩散步数来自模型的 `decoder.diffusion_steps` GGUF 元数据（缺失时默认为 10）。可在加载时通过 `cosyvoice_context_params_v4_t::diffusion_steps` 覆盖——CLI/Server 对应 `--diffusion-steps`（传 `<= 0` 表示沿用元数据值）；任何取值都会被裁剪到运行时上限 50。实际生效值可用 `cosyvoice_get_diffusion_steps()` 查询。
 
 建议的起点（共 10 个扩散步）：
 
@@ -408,7 +424,7 @@ DiT KV 缓存参数通过 CLI/server 的 `--dit-kv-*` 参数配置（context 参
 
 ## 推理 Buffer 策略
 
-推理引擎使用 buffer 策略控制中间张量的分配方式：
+推理引擎使用 buffer 策略控制中间张量的分配方式（默认 `dedicated`；CLI 非交互单次合成路径始终使用 `shared`）：
 
 - `shared`：LLM KV 缓存与 DiT 部分中间 buffer 共享内存。每次推理 LLM 模块都会完整运行一次。节省内存，但在未启用 Flash Attention 时 CUDA 上运行不稳定。
 - `balanced`：与 `shared` 类似，但在 LLM 推理完成后将下次可复用的 LLM KV 缓存卸载到 CPU。
@@ -490,7 +506,7 @@ python convert_model_to_gguf.py \
 
 ## 第三方许可说明
 - 已打包依赖的许可证信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-- 核心张量计算库：**GGML**（MIT，vendored/自动克隆）——从 llama.cpp 拆分出的底座；构建时会打上一个小 Metal 补丁。
+- 核心张量计算库：**GGML**（MIT，vendored/自动克隆）——从 llama.cpp 拆分出的底座；直接使用未经修改的上游代码。
 - **llama.cpp**（MIT）：tokenizer 实现基于其改造；**ONNX Runtime**（MIT）、**ICU**（Unicode 许可）与 **SIMDe**（MIT，可选）分别支撑前端与 SIMD 模拟。
 - FFT 实现参考/改造自 KissFFT（BSD-3-Clause），并加入了项目内 SIMD 优化；详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 

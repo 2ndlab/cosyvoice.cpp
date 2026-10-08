@@ -52,6 +52,7 @@ struct cli_options
     std::string model;
     std::string backend_path;
     std::string backend = "auto";
+    bool list_backends = false;
 #ifndef COSYVOICE_NO_FRONTEND
     bool frontend_only = false;
     std::string speech_tokenizer;
@@ -75,6 +76,7 @@ struct cli_options
     bool has_seed_policy = false;
     enum class seed_policy_mode { auto_mode, fixed, random };
     seed_policy_mode seed_policy = seed_policy_mode::auto_mode;
+    bool strict_seed = true;
     uint32_t n_threads = 0;
     bool has_llm_kv_cache_type = false;
     cosyvoice_kv_cache_type_t llm_kv_cache_type = COSYVOICE_MAKE_SEPARATE_KV_CACHE(
@@ -88,9 +90,12 @@ struct cli_options
         COSYVOICE_KV_CACHE_TYPE_Q8_0);
     uint32_t dit_kv_fixed_slots = 0;
     uint32_t dit_kv_offloadable_slots = 0;
+    uint32_t dit_kv_actual_fixed_slots = 0;
+    uint32_t dit_kv_actual_offloadable_slots = 0;
     uint32_t dit_kv_cache_length = 0;
+    int32_t diffusion_steps = 0;
     bool has_inference_buffer_policy = false;
-    cosyvoice_inference_buffer_policy_t inference_buffer_policy = COSYVOICE_INFERENCE_BUFFER_POLICY_BALANCED;
+    cosyvoice_inference_buffer_policy_t inference_buffer_policy = COSYVOICE_INFERENCE_BUFFER_POLICY_DEDICATED;
 #ifndef COSYVOICE_NO_PLAYBACK
     bool stream = false;
     uint32_t chunk_tokens = 0;
@@ -369,6 +374,7 @@ static void print_usage(const char* argv0)
     printf("  --backend <name>                            GGML backend name. Default: auto (best available).\n");
     printf("  --cpu                                       Use CPU backend (equivalent to --backend cpu).\n");
     printf("  --cuda                                      Use CUDA backend (equivalent to --backend cuda0).\n");
+    printf("  --list-backends                             List the GGML backends found at runtime and exit.\n");
 #ifdef COSYVOICE_SIMD_CONTROL_SUPPORTED
     printf("  --simd-level <auto|scalar|sse42|avx|avx2|avx10-256|avx512>\n");
     printf("                                              CPU DSP SIMD tier cap (x86-64). Default: auto (or the COSYVOICE_SIMD_LEVEL env var).\n");
@@ -388,13 +394,21 @@ static void print_usage(const char* argv0)
     printf("                                              KV cache type. Single type (e.g. q8_0) uses the same format for K and V.\n");
     printf("                                              Default: k=q8_0,v=q4_0,fallback=q8_0.\n");
     printf("  --inference-buffer-policy <shared|balanced|dedicated>\n");
-    printf("                                              Inference buffer policy (interactive only). Default: balanced.\n");
+    printf("                                              Inference buffer policy (interactive only). Default: dedicated.\n");
     printf("  --dit-kv-cache-type <f32|f16|q8_0|q5_1|q5_0|q4_1|q4_0|k=<type>,v=<type>[,fallback=<type>]>\n");
     printf("                                              DiT KV cache type (interactive only).\n");
     printf("                                              Default: k=q8_0,v=q4_0,fallback=q8_0.\n");
     printf("  --dit-kv-fixed-slots <value>                Number of fixed (non-offloadable) DiT KV slots (interactive only). Default: 0.\n");
     printf("  --dit-kv-offloadable-slots <value>          Number of offloadable DiT KV slots (interactive only). Default: 0.\n");
+    printf("  --dit-kv-actual-fixed-slots <value>         Physical device KV slots backing the fixed DiT KV slots\n");
+    printf("                                              (interactive only). Adjacent fixed steps share one cache.\n");
+    printf("                                              0 = one slot per step (no sharing). Default: 0.\n");
+    printf("  --dit-kv-actual-offloadable-slots <value>   Physical CPU KV buffers backing the offloadable DiT KV slots\n");
+    printf("                                              (interactive only). Adjacent offloadable steps share one buffer.\n");
+    printf("                                              0 = one buffer per step (no sharing). Default: 0.\n");
     printf("  --dit-kv-cache-length <value>               DiT KV cache max seq length (interactive only). Default: max-llm-len * 10.\n");
+    printf("  --diffusion-steps <value>                   Flow-matching diffusion steps. 0/negative uses the model's\n");
+    printf("                                              decoder.diffusion_steps metadata (default 10); clamped to 50.\n");
 #ifndef COSYVOICE_CLI_NO_PLAYBACK
     printf("  --stream                                    Enable streaming playback in interactive mode.\n");
     printf("  --chunk-tokens <value>                      Tokens per streaming chunk (interactive only). Default: model-defined.\n");
@@ -403,6 +417,9 @@ static void print_usage(const char* argv0)
     printf("  --flow-flash-attn <0|1>                     Enable/disable Flow/DiT flash attention. Default: 1.\n");
     printf("  --seed <value>                              Fixed seed for sampling.\n");
     printf("  --seed-policy <auto|fixed|random>           Seed strategy. Default: auto (fixed if --seed is set).\n");
+    printf("  --strict-seed <0|1>                         Strictly guarantee identical audio for the same sampler\n");
+    printf("                                              seed. Disable for a slightly faster prefill pass.\n");
+    printf("                                              Default: 1.\n");
 
     printf("\nSampling overrides:\n");
     printf("  --temperature <value>                       Sampling temperature (> 0).\n");
@@ -481,6 +498,34 @@ static void print_warning_log(const char* format, ...)
     vfprintf(stderr, format, args);
     va_end(args);
     fprintf(stderr, ANSI_RESET); // Reset text color
+}
+
+// Enumerates the GGML backends discovered at runtime, i.e. the ones that were
+// actually loaded from the executable's directory (or --backend-path). The names
+// printed here are what --backend accepts. Returns false when nothing was found,
+// which usually means the GGML libraries are missing from that directory.
+static bool print_available_backends()
+{
+    const size_t n_dev = ggml_backend_dev_count();
+    if (n_dev == 0)
+    {
+        print_error_log("Error: no GGML backends found.\n");
+        return false;
+    }
+
+    printf("Available GGML backends (pass a name to --backend):\n");
+    for (size_t i = 0; i < n_dev; ++i)
+    {
+        ggml_backend_dev_props props;
+        ggml_backend_dev_get_props(ggml_backend_dev_get(i), &props);
+
+        printf("  %-10s %-20s %s\n",
+               props.name        ? props.name        : "unknown",
+               props.device_id   ? props.device_id   : "-",
+               props.description ? props.description : "");
+    }
+
+    return true;
 }
 
 struct cli_timing_info
@@ -843,6 +888,14 @@ static void print_tts_runtime_info(
 
     print_section_title("Model");
     print_kv_line_u32("sample_rate", sample_rate);
+    {
+        char buf[160];
+        snprintf(buf, sizeof(buf), "requested: %d, actual: %d (%s)",
+            options.diffusion_steps,
+            cosyvoice_get_diffusion_steps(ctx),
+            options.diffusion_steps > 0 ? "cli override" : "default");
+        print_kv_line_string("diffusion_steps", buf);
+    }
     if (!options.interactive)
         if (!options.seed.empty())
         {
@@ -856,6 +909,7 @@ static void print_tts_runtime_info(
             snprintf(buf, sizeof(buf), "%u (random)", context_params.seed);
             print_kv_line_string("seed", buf);
         }
+    print_kv_line_string("strict_seed", enabled_to_string(options.strict_seed));
     {
         char buf[256];
         snprintf(buf, sizeof(buf), "requested: %s, actual: %s (%s)",
@@ -1621,6 +1675,8 @@ int tool_entry(int argc, char** argv)
             options.model = get_arg_value();
         else if (str_casecmp(arg, "--backend-path") == 0)
             options.backend_path = get_arg_value();
+        else if (str_casecmp(arg, "--list-backends") == 0)
+            options.list_backends = true;
         else if (str_casecmp(arg, "--backend") == 0)
         {
             if (options.backend != "auto")
@@ -1728,6 +1784,28 @@ int tool_entry(int argc, char** argv)
             }
             options.dit_kv_offloadable_slots = v;
         }
+        else if (str_casecmp(arg, "--dit-kv-actual-fixed-slots") == 0)
+        {
+            auto value = get_arg_value();
+            uint32_t v;
+            if (!parse_uint32_arg(value, &v))
+            {
+                print_error_log("Error: invalid --dit-kv-actual-fixed-slots value \"%s\".\n", value);
+                return 1;
+            }
+            options.dit_kv_actual_fixed_slots = v;
+        }
+        else if (str_casecmp(arg, "--dit-kv-actual-offloadable-slots") == 0)
+        {
+            auto value = get_arg_value();
+            uint32_t v;
+            if (!parse_uint32_arg(value, &v))
+            {
+                print_error_log("Error: invalid --dit-kv-actual-offloadable-slots value \"%s\".\n", value);
+                return 1;
+            }
+            options.dit_kv_actual_offloadable_slots = v;
+        }
         else if (str_casecmp(arg, "--dit-kv-cache-length") == 0)
         {
             auto value = get_arg_value();
@@ -1738,6 +1816,17 @@ int tool_entry(int argc, char** argv)
                 return 1;
             }
             options.dit_kv_cache_length = v;
+        }
+        else if (str_casecmp(arg, "--diffusion-steps") == 0)
+        {
+            auto value = get_arg_value();
+            int v;
+            if (!parse_int_arg(value, &v))
+            {
+                print_error_log("Error: invalid --diffusion-steps value \"%s\".\n", value);
+                return 1;
+            }
+            options.diffusion_steps = v;
         }
         #ifndef COSYVOICE_CLI_NO_PLAYBACK
         else if (str_casecmp(arg, "--stream") == 0)
@@ -1875,6 +1964,19 @@ int tool_entry(int argc, char** argv)
             options.seed_policy = policy;
             options.has_seed_policy = true;
         }
+        else if (str_casecmp(arg, "--strict-seed") == 0)
+        {
+            const auto v = to_lower(get_arg_value());
+            if (v == "1" || v == "yes" || v == "true" || v == "on")
+                options.strict_seed = true;
+            else if (v == "0" || v == "no" || v == "false" || v == "off")
+                options.strict_seed = false;
+            else
+            {
+                print_error_log("Error: invalid --strict-seed value \"%s\". Use 0/1, yes/no, true/false, on/off.\n", v.c_str());
+                return 1;
+            }
+        }
         else if (str_casecmp(arg, "--temperature") == 0)
         {
             auto value = get_arg_value();
@@ -1968,6 +2070,15 @@ int tool_entry(int argc, char** argv)
     }
 
     g_quiet_logs = options.quiet;
+
+    // Handled before validate_options(), which requires a model file: this only
+    // needs the backend runtime, so it must work with no other arguments.
+    if (options.list_backends)
+    {
+        cosyvoice_init_backend_from_path(options.backend_path.empty() ? nullptr : options.backend_path.c_str());
+        return print_available_backends() ? 0 : 1;
+    }
+
     if (!validate_options(options))
         return 1;
 
@@ -2135,7 +2246,8 @@ int tool_entry(int argc, char** argv)
     cosyvoice_init_backend_from_path(options.backend_path.empty() ? nullptr : options.backend_path.c_str());
     timing.backend_init_ms = elapsed_ms(stage_start, std::chrono::steady_clock::now());
 
-    cosyvoice_context_params_v3_t params = {};
+    cosyvoice_context_params_v4_t params_v4 = {};
+    cosyvoice_context_params_v3_t& params = params_v4.base_params;
     cosyvoice_init_default_context_params(&params.base_params.base_params);
     params.base_params.base_params.n_max_seq = options.max_llm_len;
     params.base_params.base_params.llm_kv_cache_type = options.llm_kv_cache_type;
@@ -2158,7 +2270,11 @@ int tool_entry(int argc, char** argv)
         params.dit_kv_offloadable_slots = options.dit_kv_offloadable_slots;
         params.dit_kv_cache_length = options.dit_kv_cache_length;
         params.dit_allow_kv_cache_fallback = true;
+        params_v4.dit_kv_actual_fixed_slots = options.dit_kv_actual_fixed_slots;
+        params_v4.dit_kv_actual_offloadable_slots = options.dit_kv_actual_offloadable_slots;
     }
+    params_v4.diffusion_steps = options.diffusion_steps;
+    params_v4.strict_seed_mode = options.strict_seed;
     tts_seed_state seed_state;
     const bool has_seed_value = !options.seed.empty();
     const cli_options::seed_policy_mode policy = resolve_seed_policy_mode(options);
@@ -2198,7 +2314,7 @@ int tool_entry(int argc, char** argv)
             return 1;
         }
     }
-    cosyvoice_context_handle ctx(cosyvoice_load_from_file_ext(options.model.c_str(), &params, backend, options.n_threads));
+    cosyvoice_context_handle ctx(cosyvoice_load_from_file_ext(options.model.c_str(), &params_v4, backend, options.n_threads));
     model_loading_spinner.stop(ctx != nullptr);
     timing.model_load_ms = elapsed_ms(stage_start, std::chrono::steady_clock::now());
     if (!ctx)

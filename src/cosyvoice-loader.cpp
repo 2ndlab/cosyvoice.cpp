@@ -263,8 +263,9 @@ void CausalConditionalCFM::OnLoad(gguf_loader& loader, const std::string& prefix
 
     LOAD_METADATA(inference_cfg_rate);
 
-    for (int i = 0; i != 11; ++i)
-        t_span[i] = 1.f - std::cos(0.1f * 0.5f * 3.14159265358979323846f * i);
+    t_span.resize(diffusion_steps + 1);
+    for (int i = 0; i <= diffusion_steps; ++i)
+        t_span[i] = 1.f - std::cos(0.5f * 3.14159265358979323846f * i / diffusion_steps);
 }
 
 void PreLookaheadLayer::OnLoad(gguf_loader& loader, const std::string& prefix)
@@ -748,13 +749,40 @@ void cosyvoice_model_3::load(gguf_loader& loader)
     auto& llm = cv3_shared->llm;
 
     {
-        constexpr auto diffusion_steps = CausalConditionalCFM::diffusion_steps;
+        // Resolve the effective number of diffusion steps before the flow submodule
+        // is loaded (which sizes t_span) and before the DiT KV slots are clamped.
+        // Precedence: params override (v4) > GGUF metadata > default 10, clamped to [1, MAX].
+        int32_t md_steps = 10;
+        loader.get_metadata("decoder", "diffusion_steps", md_steps);
+
+        const int32_t req_steps = shared->params.diffusion_steps;
+        int diffusion_steps = req_steps > 0 ? req_steps : md_steps;
+        if (diffusion_steps < 1)
+            diffusion_steps = 1;
+        if (diffusion_steps > CausalConditionalCFM::MAX_DIFFUSION_STEPS)
+        {
+            cosyvoice_call_ggml_log_callback(GGML_LOG_LEVEL_WARN,
+                std::format("decoder.diffusion_steps {} clamped to the maximum of {}.\n", diffusion_steps, CausalConditionalCFM::MAX_DIFFUSION_STEPS).c_str());
+            diffusion_steps = CausalConditionalCFM::MAX_DIFFUSION_STEPS;
+        }
+        flow.decoder.diffusion_steps = diffusion_steps;
+
         auto& n_fixed_slots = shared->params.dit_kv_fixed_slots;
         auto& n_offloadable_slots = shared->params.dit_kv_offloadable_slots;
         if (n_fixed_slots > diffusion_steps)
             n_fixed_slots = diffusion_steps;
         if (n_offloadable_slots + n_fixed_slots > diffusion_steps)
             n_offloadable_slots = diffusion_steps - n_fixed_slots;
+
+        // Physical slot counts backing the logical slots. 0 disables sharing (one
+        // physical slot per logical slot); a positive value merges adjacent steps
+        // into that many groups, each sharing one KV cache.
+        auto& actual_fixed = shared->params.dit_kv_actual_fixed_slots;
+        auto& actual_offloadable = shared->params.dit_kv_actual_offloadable_slots;
+        if (actual_fixed == 0 || actual_fixed > n_fixed_slots)
+            actual_fixed = n_fixed_slots;
+        if (actual_offloadable == 0 || actual_offloadable > n_offloadable_slots)
+            actual_offloadable = n_offloadable_slots;
     }
 
 
@@ -800,12 +828,6 @@ void cosyvoice_model_3::load(gguf_loader& loader)
     auto buffer_base = reinterpret_cast<char*>(ggml_backend_buffer_get_base(shared->buffer.get()));
 
     shared->backend_uma = backend_looks_uma(backend, shared->buffer.get());
-    if (shared->params.inference_buffer_policy == COSYVOICE_INFERENCE_BUFFER_POLICY_BALANCED
-        && shared->backend_uma)
-    {
-        shared->params.inference_buffer_policy = COSYVOICE_INFERENCE_BUFFER_POLICY_DEDICATED;
-        cosyvoice_call_ggml_log_callback(GGML_LOG_LEVEL_INFO, "Detected UMA-like backend memory; switching balanced inference buffers to dedicated mode.\n");
-    }
 
     shared->ctx.reset(ggml_init(params));
 
@@ -1011,8 +1033,8 @@ void cosyvoice_model_3::load(gguf_loader& loader)
                 dit_k_type,
                 dit_v_type,
                 2,
-                shared->params.dit_kv_fixed_slots + (shared->params.dit_kv_offloadable_slots != 0 ? 1 : 0),
-                shared->params.dit_kv_offloadable_slots,
+                shared->params.dit_kv_actual_fixed_slots + (shared->params.dit_kv_offloadable_slots != 0 ? 1 : 0),
+                shared->params.dit_kv_actual_offloadable_slots,
                 shared->params.flow_use_flash_attn
             );
         }

@@ -135,8 +135,9 @@ The WebUI provides a modern single-page application with the following capabilit
 
 #### Model Management
 - **Load a model** at runtime: enter a `.gguf` file path, select backend and threads, then click "Load Model".
-- **Unload a model**: releases the model from memory without restarting the server.
+- **Unload a model**: releases the model from memory without restarting the server; if a generation is running it is stopped first and in-flight requests are awaited.
 - **Parameter configuration**: LLM/DiT KV cache types, buffer policy, max LLM length, flash attention toggles, DiT KV cache slots — configurable before loading.
+- **Strict seed mode**: toggle strict seed following (identical audio for the same sampler seed) in the Advanced Model Config panel before loading; reflects the effective `--strict-seed` server value and takes effect on the next model load.
 - **Dynamic backend selection**: queries available GGML backends at startup (Auto / CPU / CUDA / Vulkan / Metal).
 
 #### Speaker (Voice) Management
@@ -151,6 +152,7 @@ The WebUI provides a modern single-page application with the following capabilit
 #### TTS Generation
 - **Text input** with configurable voice, mode (zero-shot / instruct / cross-lingual), and output format.
 - **Streaming TTS**: enable streaming mode for progressive playback as audio chunks arrive. Configurable chunk token count.
+- **Stop generation**: a Stop button appears during generation; clicking it halts synthesis (streamed audio so far is kept and remains playable/downloadable).
 - **Advanced sampling controls**: temperature, top-k, top-p, repetition window, tau-r, seed (with "lock for session").
 - **Instruct mode**: enter instructions to control speaking style (requires an instruct-capable model).
 - **Audio playback**: generated audio plays directly in the browser with a live waveform visualizer. Streaming mode uses MediaSource for true progressive playback.
@@ -169,9 +171,10 @@ The WebUI provides a modern single-page application with the following capabilit
 | `--help, -h` | Show help message and exit. |
 | `--model, -m <file>` | CosyVoice model file (`.gguf`). |
 | `--backend-path <dir>` | GGML backend directory. If omitted, the server will load the GGML backend from the executable's directory. |
-| `--backend <name>` | GGML backend name (e.g. `cpu`, `cuda0`, `vulkan`, `metal`). Default: `auto` (best available). Mutually exclusive with `--cpu`/`--cuda`. |
+| `--backend <name>` | GGML backend device name (e.g. `cpu`, `cuda0`, `mtl0` — run `cosyvoice-cli --list-backends` for the exact names on your machine). Default: `auto` (best available). Mutually exclusive with `--cpu`/`--cuda`. |
 | `--cpu` | Use CPU backend (equivalent to `--backend cpu`). Mutually exclusive with `--cuda`/`--backend`. |
 | `--cuda` | Use CUDA backend (equivalent to `--backend cuda0`). Mutually exclusive with `--cpu`/`--backend`. |
+| `--simd-level <auto\|scalar\|sse42\|avx\|avx2\|avx10-256\|avx512>` | Cap the CPU DSP SIMD tier (x86-64 only). `scalar` disables SIMD at runtime; higher levels allow every tier up to that class. Default: `auto` (or the `COSYVOICE_SIMD_LEVEL` env var). This option is not available on non-x86 builds. |
 | `--served-model-name <name>` | Exposed model id used by API/WebUI requests. If omitted, the server will use the model architecture from `cosyvoice_get_architecture()` when available, and fall back to a name derived from the model filename otherwise. |
 | `--host <host>` | Listen host. Default: `127.0.0.1`. |
 | `--port <port>` | Listen port. Default: `8080`. |
@@ -213,17 +216,21 @@ If provided at startup, the WebUI pre-populates the frontend configuration field
 |--------|-------------|
 | `--max-llm-len <value>` | Maximum LLM sequence length. Default: `2048`. |
 | `--threads, -j <value>` | CPU thread count. Default: `0` (hardware concurrency). |
-| `--inference-buffer-policy <shared\|balanced\|dedicated>` | Inference buffer policy. Default: `balanced`. |
+| `--inference-buffer-policy <shared\|balanced\|dedicated>` | Inference buffer policy. Default: `dedicated`. |
 | `--llm-kv-cache-type <f32\|f16\|q8_0\|q5_1\|q5_0\|q4_1\|q4_0\|k=<type>,v=<type>[,fallback=<type>]>` | LLM KV cache type. Single type (e.g. `q8_0`) uses the same format for K and V. Default: `k=q8_0,v=q4_0,fallback=q8_0`. |
 | `--dit-kv-cache-type <f32\|f16\|q8_0\|q5_1\|q5_0\|q4_1\|q4_0\|k=<type>,v=<type>[,fallback=<type>]>` | DiT (flow matching) KV cache type. Same format as LLM KV cache. Default: `k=q8_0,v=q4_0,fallback=q8_0`. |
 | `--dit-kv-fixed-slots <value>` | Number of fixed (non-offloadable) DiT KV cache slots. Each fixed step gets a dedicated device slot; they map to the tail of the diffusion steps. Default: `0` (disabled). |
-| `--dit-kv-offloadable-slots <value>` | Number of CPU-offloadable DiT KV cache slots. All offloadable steps share a single device scratch slot and copy KV to/from one CPU buffer per slot. Default: `0` (disabled). A value of `1` is normalized to a fixed slot. `fixed + offloadable` is clamped to the diffusion step count (10). |
+| `--dit-kv-offloadable-slots <value>` | Number of CPU-offloadable DiT KV cache slots. All offloadable steps share a single device scratch slot and copy KV to/from one CPU buffer per slot. Default: `0` (disabled). A value of `1` is normalized to a fixed slot. `fixed + offloadable` is clamped to the diffusion step count. |
+| `--dit-kv-actual-fixed-slots <value>` | Physical device KV slots backing the fixed DiT KV slots. Adjacent fixed steps are grouped and share one cache, reducing resident DiT KV memory. `0` = no sharing (one slot per fixed step); clamped to `[1, --dit-kv-fixed-slots]`. Default: `0`. |
+| `--dit-kv-actual-offloadable-slots <value>` | Physical CPU KV buffers backing the offloadable DiT KV slots. Adjacent offloadable steps are grouped and share one buffer (loaded at the group's first step, stored at its last). `0` = no sharing; clamped to `[1, --dit-kv-offloadable-slots]`. Default: `0`. |
 | `--dit-kv-cache-length <value>` | Maximum sequence length for the DiT KV cache. Default: `0` (auto, `max-llm-len * 10`). |
+| `--diffusion-steps <value>` | Number of flow-matching diffusion steps per chunk. `0`/negative uses the model's `decoder.diffusion_steps` metadata (default `10`); clamped to `50`. |
 | `--llm-flash-attn <0\|1>` | Enable/disable LLM flash attention. Default: `1` (enabled). |
 | `--flow-flash-attn <0\|1>` | Enable/disable Flow/DiT flash attention. Default: `1` (enabled). |
 | `--stream` | Enable streaming TTS for all requests by default (WebUI and API). |
 | `--chunk-tokens <value>` | Number of tokens per streaming chunk. Smaller chunks → lower first-chunk latency but higher overhead and RTF; larger chunks → lower RTF but higher first-chunk latency. Default: model-defined (varies by model). |
 | `--seed <value>` | Default random seed for the built-in sampler (when request does not provide a seed). |
+| `--strict-seed <0\|1>` | Strictly guarantee identical audio for the same sampler seed. Disable for a slightly faster prefill pass. Default: `1` (enabled). |
 
 ### Sampling Default Overrides (Server-level)
 
@@ -310,13 +317,15 @@ Returns server status as JSON:
   "model_loaded": true,
   "model": "cosyvoice-3",
   "sample_rate": 24000,
+  "strict_seed": true,
   "max_llm_len": 2048,
   "k_cache_type": "Q8_0",
   "v_cache_type": "Q4_0",
-  "buffer_policy": "balanced",
+  "buffer_policy": "dedicated",
   "llm_use_flash_attn": true,
   "flow_use_flash_attn": true,
   "model_arch": "cosyvoice3-2512",
+  "diffusion_steps": 10,
   "frontend_available": false,
   "speakers": ["alloy", "nova"]
 }
@@ -390,12 +399,19 @@ Returns raw audio bytes with the appropriate `Content-Type` header (`audio/wav`,
 
 When `stream` is `true` (or the server was started with `--stream`), the response is delivered as a chunked HTTP transfer. Audio chunks are streamed incrementally as they are generated. All output formats support streaming at the server level. When using the WebUI, the browser player requires MP3, Opus, AAC or FLAC (the MediaSource API does not support WAV progressive playback). When `stream` is `false` (default), the full audio is buffered and returned as a single blob.
 
+#### `POST /tts/stop`
+
+Stops the active TTS generation (WebUI mode only). Issues a cooperative stop request to the model slot and blocks until the in-flight generation has actually stopped. Audio already delivered in a streaming response remains playable; the WebUI shows a **Stop** button during generation and keeps the partial result in the history panel.
+
+Returns `{"success": true}` on `200`, or `409` with `{"error": "No model loaded"}` when no model is loaded.
+
 #### `GET /model/defaults`
 
 Returns default model parameters as JSON (field set varies based on loaded model):
 ```json
 {
   "max_llm_len": 2048,
+  "strict_seed_mode": true,
   "temperature": 1.0,
   "top_k": 50,
   "top_p": 0.9,
@@ -404,7 +420,10 @@ Returns default model parameters as JSON (field set varies based on loaded model
   "default_dit_v_cache_type": "q4_0",
   "default_dit_kv_fixed_slots": 1,
   "default_dit_kv_offloadable_slots": 0,
+  "default_dit_kv_actual_fixed_slots": 0,
+  "default_dit_kv_actual_offloadable_slots": 0,
   "default_dit_kv_cache_length": 20480,
+  "default_diffusion_steps": 0,
   ...
 }
 ```
@@ -420,30 +439,38 @@ Loads a model into the server at runtime. JSON body:
   "backend": "auto",
   "n_threads": 8,
   "max_llm_len": 2048,
-  "buffer_policy": "balanced",
+  "buffer_policy": "dedicated",
   "k_cache_type": "q8_0",
   "v_cache_type": "q4_0",
   "llm_use_flash_attn": true,
   "flow_use_flash_attn": true,
+  "strict_seed_mode": true,
   "dit_kv_cache_type": "k=q8_0,v=q4_0,fallback=q8_0",
   "dit_kv_fixed_slots": 0,
   "dit_kv_offloadable_slots": 0,
+  "dit_kv_actual_fixed_slots": 0,
+  "dit_kv_actual_offloadable_slots": 0,
   "dit_kv_cache_length": 0,
+  "diffusion_steps": 0,
   "chunk_tokens": 0
 }
 ```
 
 Additional fields:
 - `llm_use_flash_attn`, `flow_use_flash_attn`: `true`/`false` toggles for flash attention.
+- `strict_seed_mode`: `true`/`false` toggle for strict seed following (identical audio for the same sampler seed). Defaults to the server's `--strict-seed` value; the effective value is reported by `GET /model/defaults` (`strict_seed_mode`) and `GET /status` (`strict_seed`). Fixed at load time — unload and reload the model to change it.
 - `dit_kv_cache_type`: DiT KV cache type (same format as `k_cache_type`).
 - `dit_kv_fixed_slots`: Number of fixed DiT KV cache slots (0 = disabled). Each fixed step gets a dedicated device slot, mapped to the tail of the diffusion steps.
-- `dit_kv_offloadable_slots`: Number of CPU-offloadable DiT KV cache slots (0 = disabled). All offloadable steps share one device scratch slot plus one CPU buffer each. `1` is normalized to a fixed slot; `fixed + offloadable` is clamped to 10.
+- `dit_kv_offloadable_slots`: Number of CPU-offloadable DiT KV cache slots (0 = disabled). All offloadable steps share one device scratch slot plus one CPU buffer each. `1` is normalized to a fixed slot; `fixed + offloadable` is clamped to the diffusion step count.
+- `dit_kv_actual_fixed_slots`: Physical device KV slots backing the fixed slots (0 = no sharing); adjacent fixed steps share one cache. Clamped to `[1, dit_kv_fixed_slots]`.
+- `dit_kv_actual_offloadable_slots`: Physical CPU KV buffers backing the offloadable slots (0 = no sharing); adjacent offloadable steps share one buffer. Clamped to `[1, dit_kv_offloadable_slots]`.
 - `dit_kv_cache_length`: Maximum DiT KV cache sequence length (0 = auto, `max_llm_len * 10`).
+- `diffusion_steps`: Number of flow-matching diffusion steps. `0`/negative keeps the model's `decoder.diffusion_steps` metadata (default `10`); positive values are clamped to `50`. The response includes the effective `diffusion_steps`.
 - `chunk_tokens`: Tokens per streaming chunk (0 = model default).
 
 #### `POST /model/unload`
 
-Unloads the current model. JSON body not required.
+Unloads the current model. JSON body not required. If a TTS generation is in progress, the server first issues a stop request and waits for all in-flight `/tts` requests (including streaming providers) to finish before releasing model resources.
 
 #### `GET /frontend/model`
 
@@ -731,9 +758,11 @@ Core options:
 - `--interactive`: Run in interactive REPL mode.
 - `--model, -m <file>`: CosyVoice model file (`.gguf`) used for TTS.
 - `--backend-path <dir>`: GGML backend directory. If omitted, the CLI will load the GGML backend from the executable's directory.
-- `--backend <name>`: GGML backend name (e.g. `cpu`, `cuda0`, `vulkan`, `metal`). Default: `auto` (best available). Mutually exclusive with `--cpu`/`--cuda`.
+- `--backend <name>`: GGML backend device name (e.g. `cpu`, `cuda0`, `mtl0` — run `cosyvoice-cli --list-backends` for the exact names on your machine). Default: `auto` (best available). Mutually exclusive with `--cpu`/`--cuda`.
 - `--cpu`: Use CPU backend (equivalent to `--backend cpu`). Mutually exclusive with `--cuda`/`--backend`.
 - `--cuda`: Use CUDA backend (equivalent to `--backend cuda0`). Mutually exclusive with `--cpu`/`--backend`.
+- `--list-backends`: Print the GGML backends discovered at runtime (the ones actually loaded from the executable's directory, or `--backend-path`) and exit. The names printed are exactly what `--backend` accepts. Useful to confirm that the GGML libraries are in the right place and new enough; the server exposes the same list over HTTP via `GET /backends`.
+- `--simd-level <auto|scalar|sse42|avx|avx2|avx10-256|avx512>`: Cap the CPU DSP SIMD tier (x86-64 only). `scalar` disables SIMD at runtime without a rebuild; higher levels allow every tier up to that class. Default: `auto` (or the `COSYVOICE_SIMD_LEVEL` env var). Applies to the frontend DSP path (`--frontend-only`) as well. Not available on non-x86 builds.
 - `--text, -t <text>`: Text to synthesize.
 - `--output, -o <file>`: Output audio path.
   - Normal build: format is inferred from file extension.
@@ -741,16 +770,20 @@ Core options:
 - `--speed, -s <value>`: Speech speed multiplier. Default: `1.0`. Must be `> 0`.
 - `--seed <value>`: Random seed for sampling and internal noise generation. Must be an unsigned 32-bit integer. Default: random.
 - `--seed-policy <auto|fixed|random>`: Seed strategy. `auto` = `fixed` if `--seed` is given, otherwise `random`. Default: `auto`. Ignored in `--frontend-only` mode (warning will be printed).
+- `--strict-seed <0|1>`: Strictly guarantee identical audio for the same sampler seed, at the cost of a small extra prefill pass. Disable for a slightly faster prefill (strict seed reproducibility is then no longer guaranteed). Default: `1` (enabled).
 - `--max-llm-len <value>`: Maximum input token count for LLM (`n_max_seq`). Default: `2048`. Must be a positive integer.
 - `--threads, -j <value>`: CPU thread count for model inference. Must be an unsigned 32-bit integer. Default: `0` (use current hardware concurrency).
 - `--llm-kv-cache-type <f32|f16|q8_0|q5_1|q5_0|q4_1|q4_0|k=<type>,v=<type>[,fallback=<type>]>`: LLM KV cache type. Single type (e.g. `q8_0`) uses the same format for K and V. Use separate K/V types (e.g. `k=q8_0,v=q4_0`) for different formats. Default: `k=q8_0,v=q4_0,fallback=q8_0`.
-- `--inference-buffer-policy <shared|balanced|dedicated>`: Inference buffer policy. Only effective in interactive mode; non-interactive mode always uses `shared` for minimal memory footprint and fastest single-shot synthesis. Default: `balanced`.
+- `--inference-buffer-policy <shared|balanced|dedicated>`: Inference buffer policy. Only effective in interactive mode; non-interactive mode always uses `shared` for minimal memory footprint and fastest single-shot synthesis. Default: `dedicated`.
 - `--mode <zero-shot|instruct|cross-lingual>`: TTS mode. Default: auto-detect from `--instruction`.
 - `--instruction, -i <text>`: Instruction text for instruct mode.
 - `--dit-kv-cache-type <f32|f16|q8_0|q5_1|q5_0|q4_1|q4_0|k=<type>,v=<type>[,fallback=<type>]>`: DiT KV cache type (interactive only). Same format as `--llm-kv-cache-type`. Default: `k=q8_0,v=q4_0,fallback=q8_0`.
 - `--dit-kv-fixed-slots <value>`: Number of fixed (non-offloadable) DiT KV cache slots (interactive only). Each fixed step occupies a dedicated device slot; fixed steps map to the tail of the diffusion steps. Default: `0` (disabled).
-- `--dit-kv-offloadable-slots <value>`: Number of CPU-offloadable DiT KV cache slots (interactive only). All offloadable steps share a single device scratch slot and copy KV to/from one CPU buffer per slot. Default: `0` (disabled). A value of `1` is normalized to a fixed slot; `fixed + offloadable` is clamped to 10 (diffusion steps).
+- `--dit-kv-offloadable-slots <value>`: Number of CPU-offloadable DiT KV cache slots (interactive only). All offloadable steps share a single device scratch slot and copy KV to/from one CPU buffer per slot. Default: `0` (disabled). A value of `1` is normalized to a fixed slot; `fixed + offloadable` is clamped to the diffusion step count.
+- `--dit-kv-actual-fixed-slots <value>`: Physical device KV slots backing the fixed DiT KV slots (interactive only). Adjacent fixed steps are grouped and share one cache, reducing resident DiT KV memory. `0` = no sharing (one slot per fixed step); clamped to `[1, --dit-kv-fixed-slots]`. Default: `0`.
+- `--dit-kv-actual-offloadable-slots <value>`: Physical CPU KV buffers backing the offloadable DiT KV slots (interactive only). Adjacent offloadable steps are grouped and share one buffer (loaded at the group's first step, stored at its last). `0` = no sharing; clamped to `[1, --dit-kv-offloadable-slots]`. Default: `0`.
 - `--dit-kv-cache-length <value>`: Maximum DiT KV cache sequence length (interactive only). Default: `0` (auto, `max-llm-len * 10`).
+- `--diffusion-steps <value>`: Number of flow-matching diffusion steps per chunk. `0`/negative uses the model's `decoder.diffusion_steps` metadata (default `10`); clamped to `50`.
 - `--stream`: Enable streaming playback in interactive mode (audio plays progressively during generation).
 - `--chunk-tokens <value>`: Tokens per streaming chunk (interactive only). Smaller chunks → lower first-chunk latency but higher overhead and RTF; larger chunks → lower RTF but higher first-chunk latency. Default: model-defined.
 - `--llm-flash-attn <0|1>`: Enable/disable LLM flash attention. Default: `1` (enabled).
@@ -799,8 +832,7 @@ Text normalization:
 Runtime logs:
 - Basic request info (model path, mode, prompt source, output, speed, resolved CPU thread count, seed source) is shown before model loading.
 - During model loading, a spinner (`| / - \\`) is shown in the console.
-- Backend info now includes UMA (unified memory architecture) detection result and effective buffer policy.
-- When UMA is detected and the requested buffer policy is `balanced`, the library automatically switches to `dedicated` for better throughput; a log message is printed in this case.
+- Backend info now includes UMA (unified memory architecture) detection result and effective buffer policy. The UMA result is informational only and does not change the buffer policy.
 - Default output is concise and formatted with sections.
 - `--verbose` shows full runtime details, including context/memory breakdown and full timing stages.
 - `--quiet` suppresses runtime info and timings (errors still print).
@@ -834,14 +866,19 @@ Required vs optional:
 | `--max-llm-len` | `2048` | CLI |
 | `--threads` | `0` (hardware concurrency) | CLI |
 | `--llm-kv-cache-type` | `k=q8_0,v=q4_0,fallback=q8_0` | CLI |
-| `--inference-buffer-policy` | `balanced` (interactive) / `shared` (non-interactive) | CLI |
+| `--inference-buffer-policy` | `dedicated` (interactive) / `shared` (non-interactive) | CLI |
 | `--seed` | random | runtime |
+| `--strict-seed` | `1` (enabled) | CLI |
+| `--simd-level` | `auto` (or `COSYVOICE_SIMD_LEVEL`) | CLI |
 | `--stream` | `false` | CLI |
 | `--chunk-tokens` | model-defined | model |
 | `--dit-kv-cache-type` | `k=q8_0,v=q4_0,fallback=q8_0` | CLI |
 | `--dit-kv-fixed-slots` | `0` (disabled) | CLI |
 | `--dit-kv-offloadable-slots` | `0` (disabled) | CLI |
+| `--dit-kv-actual-fixed-slots` | `0` (no sharing) | CLI |
+| `--dit-kv-actual-offloadable-slots` | `0` (no sharing) | CLI |
 | `--dit-kv-cache-length` | `0` (auto, `max-llm-len * 10`) | CLI |
+| `--diffusion-steps` | `0` (model `decoder.diffusion_steps` metadata, default `10`; max `50`) | CLI |
 | `--llm-flash-attn` | `1` (enabled) | CLI |
 | `--flow-flash-attn` | `1` (enabled) | CLI |
 | `temperature`, `top_k`, `top_p`, `win_size`, `tau_r`, `min/max_token_text_ratio` | model metadata | model |

@@ -7,7 +7,7 @@
 | 文件 | 职责 |
 |---|---|
 | `src/simd-dispatch.h` | `simd_caps` 结构体、preset、`simd_dispatch<Kernel>`——不含任何 intrinsic 类型，调用方 TU 可安全包含 |
-| `src/simd_detect.cpp` | CPUID/XCR0 特性探测 → `g_simd_caps`（仅 x86-64） |
+| `src/simd_detect.cpp` | CPUID/XCR0 特性探测 → 不可变 `g_simd_hw_caps` + 可写 `g_simd_caps`（初始与硬件能力一致）+ `COSYVOICE_SIMD_LEVEL` 环境变量初始化——全部定义在同一 TU，初始化顺序由定义顺序保证（仅 x86-64） |
 | `src/simd-kernels.h` | kernel 类声明 + `simd_vec<C, N>` 向量 typedef + extern template 声明 |
 | `src/simd-kernels-impl.h` | 全部 kernel 本体与支持助手，按 `simd_caps C` 模板化——**只**被层级 TU 包含 |
 | `src/simd-math.h` | 向量 log/sincos 助手（128/256/512）——**只**被层级 TU 包含 |
@@ -70,11 +70,48 @@ AVX10 的 preset 只带 `fma3` + 自己的位。因此共享代码路径在两�
   `EBX bit16` = 256 位，`EBX bit17` = 512 位。256 类还要求
   `XCR0 & 0x26 == 0x26`（opmask）；512 类要完整 `0xE6`。版本 ≥ 1 即点亮
   两类；10.2 与 10.1 点亮相同的位。
-- 结果缓存于 `g_simd_caps`（一次性静态初始化）；Debug 构建启动时打印探测结果。
+- 探测结果缓存于不可变的 `g_simd_hw_caps`（一次性静态初始化）；可变的
+  `g_simd_caps`（分派实际读取的对象）以同一值起步。Debug 构建启动时打印探测结果。
+
+## 运行时控制 API
+
+- x86-64 构建在 `cosyvoice.h` 暴露 `cosyvoice_get_simd_info()` /
+  `cosyvoice_get_simd_level()` / `cosyvoice_set_simd_level()`（特性检测宏
+  `COSYVOICE_SIMD_CONTROL_SUPPORTED`）。层级上限作用于**分派层级**而非硬件：
+  setter 一次性计算 `simd_caps_for_level(g_simd_hw_caps, level)`
+  （位于 `simd-dispatch.h`）并把结果写入可变的 `g_simd_caps`；分派热路径
+  随后只剩对该值的一次 relaxed 原子加载 + 既有的"最强优先"链——例如
+  AVX-512 机器上设 `COSYVOICE_SIMD_LEVEL_AVX2` 会选中 AVX2 层，设
+  `COSYVOICE_SIMD_LEVEL_SCALAR` 强制标量层。`AUTO`（默认）恢复为无上限的
+  硬件真值。
+- 上限按每层一类对应：SSE42、AVX、AVX2、AVX10.1-256、AVX-512。AVX-512 档
+  同时放行 AVX10-512（同一层）；AVX10-256 档只移除两个 512 位枚举来源，因此
+  AVX10 能力部件保留 256 层、其余部件保留 AVX2 及以下。请求高于硬件能力或
+  构建未包含的层级无害（分派自动钳制到可用最优层）。
+- 语义：进程级全局、原子。封顶计算只在设置时执行一次；分派热路径仅是对
+  `g_simd_caps`（C++17 `inline` 原子变量，各调用方 TU 共享同一实例）的一次
+  relaxed load，相对 O(n) 内核可忽略。`g_simd_level` 只是供
+  `cosyvoice_get_simd_level()` / `cosyvoice_simd_info_t.level` 读回用的元数据，
+  不参与分派。修改影响后续内核调用；已进入的内核保持其入口时的层级。
+- 环境变量：`COSYVOICE_SIMD_LEVEL` 在**库加载时**（`simd_detect.cpp` 的静态
+  初始化，与探测结果同 TU，初始化顺序由定义顺序保证）读取一次，对所有
+  消费者生效。取值（大小写不敏感）：`auto`、
+  `scalar`（别名 `none`）、`sse42`（别名 `sse4.2`）、`avx`、`avx2`、
+  `avx10-256`（别名 `avx10_256`、`avx10.1-256`、`avx10_1_256`）、`avx512`
+  （别名 `avx-512`）。非法值静默忽略；进程启动后修改环境变量无效。
+  优先级：显式 `cosyvoice_set_simd_level()`（如 CLI/Server 的 `--simd-level`）
+  > 环境变量 > `AUTO`。
+- 可用性：x86-64 始终导出这些符号，含 `COSYVOICE_NO_SIMD` 构建（此时
+  `supported`/`current` 报 0、`scalar_only=true`，仅接受 `AUTO`/`SCALAR`）。
+  非 x86（ARM64/SIMDe）构建什么都不导出——层级编译期固定——且头文件特性宏
+  未定义；调用需用该宏保护。
+- 层级枚举值是公开 ABI：`simd-dispatch.h` 中的内部 `simd_level` 必须与
+  `cosyvoice_simd_level_t` 完全一致（`cosyvoice-simd.cpp` 里的
+  `static_assert` 逐值校验）。
 
 ## 分派
 
-`simd_dispatch<Kernel>(args...)` 是所有调用方 TU 共享的一个内联模板。顺序：
+`simd_dispatch<Kernel>(args...)` 是所有调用方 TU 共享的一个内联模板；x86 上它从可变的 `g_simd_caps`（硬件真值经运行时层级封顶，见上节）选择层级。顺序：
 **512（legacy ∨ AVX10）→ AVX10.1-256 → AVX2 → AVX → SSE4.2 → 标量**。
 构建期关闭的类被整个编出分派链（每个 case 外有
 `#if defined(COSYVOICE_HAS_*)`），所以 CPU 总是落到可用层级里的最优档；

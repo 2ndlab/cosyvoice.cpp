@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -117,8 +118,9 @@ struct server_runtime
     bool has_seed = false;
     bool webui_enabled = false;
     uint32_t seed = 0;
+    bool strict_seed_mode = true;
     uint32_t concurrency = 1;
-    cosyvoice_inference_buffer_policy_t inference_buffer_policy = COSYVOICE_INFERENCE_BUFFER_POLICY_BALANCED;
+    cosyvoice_inference_buffer_policy_t inference_buffer_policy = COSYVOICE_INFERENCE_BUFFER_POLICY_DEDICATED;
     bool has_llm_kv_cache_override = false;
     cosyvoice_kv_cache_type_t requested_llm_kv_cache_type = static_cast<cosyvoice_kv_cache_type_t>(0);
     cosyvoice_kv_cache_type_t actual_llm_kv_cache_type = static_cast<cosyvoice_kv_cache_type_t>(0);
@@ -137,7 +139,10 @@ struct server_runtime
     // Effective DiT KV cache params (populated after model load)
     uint32_t dit_kv_fixed_slots          = 0;
     uint32_t dit_kv_offloadable_slots    = 0;
+    uint32_t dit_kv_actual_fixed_slots   = 0;
+    uint32_t dit_kv_actual_offloadable_slots = 0;
     uint32_t dit_kv_cache_length         = 0;
+    int      diffusion_steps             = 0;
 
     // Frontend model paths (ONNX, for feature extraction)
     std::string frontend_model;
@@ -166,6 +171,34 @@ struct server_runtime
     std::vector<bool>       slot_in_use;
 
     stop_thread_pool        stop_pool;  // dedicated thread for stop requests
+
+    // In-flight TTS request tracking (WebUI stop/unload safety)
+    std::mutex              tts_mutex;
+    std::condition_variable tts_cv;
+    uint32_t                active_tts = 0;
+};
+
+// RAII: marks an in-flight TTS request. Constructed when /tts handling starts,
+// destroyed when the request (including the streaming provider) is fully done.
+struct tts_request_scope
+{
+    server_runtime* rt;
+
+    explicit tts_request_scope(server_runtime& r) : rt(&r)
+    {
+        std::lock_guard<std::mutex> lock(rt->tts_mutex);
+        ++rt->active_tts;
+    }
+
+    ~tts_request_scope()
+    {
+        std::lock_guard<std::mutex> lock(rt->tts_mutex);
+        --rt->active_tts;
+        rt->tts_cv.notify_all();
+    }
+
+    tts_request_scope(const tts_request_scope&) = delete;
+    tts_request_scope& operator=(const tts_request_scope&) = delete;
 };
 
 inline cosyvoice_context_t get_slot_model_context(server_runtime& runtime, uint32_t slot)

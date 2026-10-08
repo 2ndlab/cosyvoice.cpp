@@ -44,10 +44,11 @@ struct server_options
     uint32_t n_threads = 0;
     uint32_t concurrency = 1;
     bool has_inference_buffer_policy = false;
-    cosyvoice_inference_buffer_policy_t inference_buffer_policy = COSYVOICE_INFERENCE_BUFFER_POLICY_BALANCED;
+    cosyvoice_inference_buffer_policy_t inference_buffer_policy = COSYVOICE_INFERENCE_BUFFER_POLICY_DEDICATED;
 
     bool has_seed = false;
     uint32_t seed = 0;
+    bool strict_seed = true;
 #ifdef COSYVOICE_SIMD_CONTROL_SUPPORTED
     bool has_simd_level = false;
     cosyvoice_simd_level_t simd_level = COSYVOICE_SIMD_LEVEL_AUTO;
@@ -66,7 +67,10 @@ struct server_options
         COSYVOICE_KV_CACHE_TYPE_Q8_0);
     uint32_t dit_kv_fixed_slots = 0;
     uint32_t dit_kv_offloadable_slots = 0;
+    uint32_t dit_kv_actual_fixed_slots = 0;
+    uint32_t dit_kv_actual_offloadable_slots = 0;
     uint32_t dit_kv_cache_length = 0;
+    int diffusion_steps = 0;
     bool stream = false;
     bool has_chunk_tokens = false;
     uint32_t chunk_tokens = 0;
@@ -134,16 +138,22 @@ static void print_usage(const char* argv0)
     printf("  --threads, -j <value>                       CPU thread count. Default: 0 (hardware concurrency).\n");
     printf("  --concurrency, -c <value>                   Concurrent request slots. Default: 1.\n");
     printf("  --inference-buffer-policy <shared|balanced|dedicated>\n");
-    printf("                                              Inference buffer policy. Default: balanced.\n");
+    printf("                                              Inference buffer policy. Default: dedicated.\n");
     printf("  --llm-kv-cache-type <f32|f16|q8_0|q5_1|q5_0|q4_1|q4_0|k=<type>,v=<type>[,fallback=<type>]>\n");
     printf("                                              KV cache type. Single type (e.g. q8_0) uses the same format for K and V.\n");
     printf("                                              Default: k=q8_0,v=q4_0,fallback=q8_0.\n");
     printf("  --seed <value>                              Default random seed for built-in sampler.\n");
+    printf("  --strict-seed <0|1>                         Strictly guarantee identical audio for the same sampler\n");
+    printf("                                              seed. Disable for a slightly faster prefill pass.\n");
+    printf("                                              Default: 1.\n");
     printf("  --dit-kv-cache-type <f32|f16|q8_0|q5_1|q5_0|q4_1|q4_0|k=<type>,v=<type>[,fallback=<type>]>\n");
     printf("                                              DiT KV cache type. Default: k=q8_0,v=q4_0,fallback=q8_0.\n");
     printf("  --dit-kv-fixed-slots <value>                DiT KV fixed slots (0 = auto).\n");
     printf("  --dit-kv-offloadable-slots <value>          DiT KV offloadable slots (0 = auto).\n");
+    printf("  --dit-kv-actual-fixed-slots <value>         Physical device KV slots for the fixed DiT KV slots (0 = no sharing).\n");
+    printf("  --dit-kv-actual-offloadable-slots <value>   Physical CPU KV buffers for the offloadable DiT KV slots (0 = no sharing).\n");
     printf("  --dit-kv-cache-length <value>               DiT KV cache length (0 = auto).\n");
+    printf("  --diffusion-steps <value>                   Flow diffusion steps (0/negative = use metadata, default 10; max 50).\n");
     printf("  --stream                                    Enable streaming for TTS requests.\n");
     printf("  --chunk-tokens <value>                      Tokens per streaming chunk. Default: model-defined.\n");
 
@@ -257,7 +267,9 @@ static std::string derive_served_model_name(const std::string& model_path)
 
 static bool init_model_context(const server_options& options, ggml_backend_t backend, server_runtime* runtime)
 {
-    cosyvoice_context_params_v3_cpp context_params{ .dit_allow_kv_cache_fallback = true };
+    cosyvoice_context_params_v4_cpp context_params_v4 = {};
+    cosyvoice_context_params_v3_cpp& context_params = context_params_v4;
+    context_params.dit_allow_kv_cache_fallback = true;
     cosyvoice_init_default_context_params(&context_params);
     context_params.inference_buffer_policy = options.inference_buffer_policy;
     context_params.n_max_seq = options.max_llm_len;
@@ -270,6 +282,10 @@ static bool init_model_context(const server_options& options, ggml_backend_t bac
     context_params.dit_kv_fixed_slots = options.dit_kv_fixed_slots;
     context_params.dit_kv_offloadable_slots = options.dit_kv_offloadable_slots;
     context_params.dit_kv_cache_length = options.dit_kv_cache_length;
+    context_params_v4.diffusion_steps = options.diffusion_steps;
+    context_params_v4.dit_kv_actual_fixed_slots = options.dit_kv_actual_fixed_slots;
+    context_params_v4.dit_kv_actual_offloadable_slots = options.dit_kv_actual_offloadable_slots;
+    context_params_v4.strict_seed_mode = options.strict_seed;
     if (options.has_seed)
         context_params.seed = options.seed;
     context_params.n_workers = options.concurrency;
@@ -277,7 +293,7 @@ static bool init_model_context(const server_options& options, ggml_backend_t bac
     runtime->model_slots.reserve(options.concurrency);
     runtime->model_slots.emplace_back(cosyvoice_load_from_file_ext(
         options.model.c_str(),
-        &context_params,
+        &context_params_v4,
         backend,
         options.n_threads));
 
@@ -291,6 +307,9 @@ static bool init_model_context(const server_options& options, ggml_backend_t bac
     runtime->dit_kv_fixed_slots = context_params.dit_kv_fixed_slots;
     runtime->dit_kv_offloadable_slots = context_params.dit_kv_offloadable_slots;
     runtime->dit_kv_cache_length = context_params.dit_kv_cache_length;
+    runtime->dit_kv_actual_fixed_slots = context_params_v4.dit_kv_actual_fixed_slots;
+    runtime->dit_kv_actual_offloadable_slots = context_params_v4.dit_kv_actual_offloadable_slots;
+    runtime->diffusion_steps = context_params_v4.diffusion_steps;
 
     return true;
 }
@@ -401,6 +420,7 @@ static bool build_runtime(const server_options& options, server_runtime* runtime
     runtime->port = options.port;
     runtime->has_seed = options.has_seed;
     runtime->seed = options.seed;
+    runtime->strict_seed_mode = options.strict_seed;
     runtime->concurrency = options.concurrency;
     runtime->inference_buffer_policy = options.inference_buffer_policy;
 #ifndef COSYVOICE_NO_ICU
@@ -488,6 +508,7 @@ static bool webui_build_runtime(const server_options& options, server_runtime* r
     runtime->port = options.port;
     runtime->has_seed = options.has_seed;
     runtime->seed = options.seed;
+    runtime->strict_seed_mode = options.strict_seed;
     runtime->concurrency = 1;
     runtime->inference_buffer_policy = options.inference_buffer_policy;
 #ifndef COSYVOICE_NO_ICU
@@ -789,6 +810,19 @@ int tool_entry(int argc, char** argv)
                 options.seed = seed;
                 options.has_seed = true;
             }
+            else if (str_casecmp(arg, "--strict-seed") == 0)
+            {
+                const auto v = to_lower(get_arg_value());
+                if (v == "1" || v == "yes" || v == "true" || v == "on")
+                    options.strict_seed = true;
+                else if (v == "0" || v == "no" || v == "false" || v == "off")
+                    options.strict_seed = false;
+                else
+                {
+                    fprintf(stderr, "Error: invalid --strict-seed value \"%s\". Use 0/1, yes/no, true/false, on/off.\n", v.c_str());
+                    return 1;
+                }
+            }
             else if (str_casecmp(arg, "--temperature") == 0)
             {
                 const auto value = get_arg_value();
@@ -919,6 +953,28 @@ int tool_entry(int argc, char** argv)
                 }
                 options.dit_kv_offloadable_slots = v;
             }
+            else if (str_casecmp(arg, "--dit-kv-actual-fixed-slots") == 0)
+            {
+                const auto value = get_arg_value();
+                uint32_t v;
+                if (!parse_uint32_arg(value, &v))
+                {
+                    fprintf(stderr, "Error: invalid --dit-kv-actual-fixed-slots value \"%s\".\n", value);
+                    return 1;
+                }
+                options.dit_kv_actual_fixed_slots = v;
+            }
+            else if (str_casecmp(arg, "--dit-kv-actual-offloadable-slots") == 0)
+            {
+                const auto value = get_arg_value();
+                uint32_t v;
+                if (!parse_uint32_arg(value, &v))
+                {
+                    fprintf(stderr, "Error: invalid --dit-kv-actual-offloadable-slots value \"%s\".\n", value);
+                    return 1;
+                }
+                options.dit_kv_actual_offloadable_slots = v;
+            }
             else if (str_casecmp(arg, "--dit-kv-cache-length") == 0)
             {
                 const auto value = get_arg_value();
@@ -929,6 +985,17 @@ int tool_entry(int argc, char** argv)
                     return 1;
                 }
                 options.dit_kv_cache_length = v;
+            }
+            else if (str_casecmp(arg, "--diffusion-steps") == 0)
+            {
+                const auto value = get_arg_value();
+                int v;
+                if (!parse_int_arg(value, &v))
+                {
+                    fprintf(stderr, "Error: invalid --diffusion-steps value \"%s\".\n", value);
+                    return 1;
+                }
+                options.diffusion_steps = v;
             }
             else if (str_casecmp(arg, "--stream") == 0)
                 options.stream = true;

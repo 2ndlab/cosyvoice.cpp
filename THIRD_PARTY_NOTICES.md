@@ -11,14 +11,12 @@ contains code adapted/referenced from external open-source projects.
   backs the LLM, Flow (DiT), and HiFT inference and all accelerator backends
   (CUDA / Metal / Vulkan / SYCL). GGML is the foundation split out of the
   llama.cpp project.
-- Local modifications: `cmake/patches/ggml-metal-pad-beg.patch` (Metal PAD
-  beg-padding support for the flow decoder), applied idempotently at build
-  time; the rest of the tree is unmodified upstream code.
+- Local modifications: none — the tree is used as unmodified upstream code.
 - Upstream copyright: Copyright (C) 2020-2026 Georgi Gerganov and GGML contributors
 - License: MIT
 - License text location: `LICENSE` at the root of the upstream repository (it ships
-  with the full clone the build fetches). `vendor/ggml/` is git-ignored and may be a
-  partial local copy without the LICENSE file — if you redistribute, restore the
+  with the upstream clone the build fetches). `vendor/ggml/` is git-ignored and may be a
+  shallow local copy without the LICENSE file — if you redistribute, restore the
   full upstream tree (delete `vendor/ggml` and let CMake re-clone) and ship the
   MIT text with your binary.
 

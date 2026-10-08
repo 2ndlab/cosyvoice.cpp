@@ -302,6 +302,19 @@ typedef struct cosyvoice_context_params_v3
     uint32_t dit_kv_offloadable_slots;    ///< Number of offloadable DiT KV slots.
     uint32_t dit_kv_cache_length;         ///< Maximum sequence length for the DiT KV cache. 0 to use default (n_max_seq * 10).
 } cosyvoice_context_params_v3_t;
+
+/**
+ * @brief Extended context parameters that add custom diffusion step configuration.
+ */
+typedef struct cosyvoice_context_params_v4
+{
+    cosyvoice_context_params_v3_t base_params; ///< V3 base parameters.
+    int32_t diffusion_steps;                   ///< Number of flow-matching diffusion steps. When `<= 0`, the value comes from the `decoder.diffusion_steps` GGUF metadata (which itself defaults to 10 when absent); otherwise it is clamped to the runtime maximum.
+    uint32_t dit_kv_actual_fixed_slots;        ///< Number of physical device KV slots backing the fixed DiT KV slots. Adjacent fixed steps are grouped and share one slot, trading a small cross-step KV approximation for memory. `0` means one slot per fixed step (no sharing); clamped to `[1, dit_kv_fixed_slots]`.
+    uint32_t dit_kv_actual_offloadable_slots;  ///< Number of physical CPU KV buffers backing the offloadable DiT KV slots. Adjacent offloadable steps are grouped and share one buffer, also reducing per-step CPU round-trips. `0` means one buffer per offloadable step (no sharing); clamped to `[1, dit_kv_offloadable_slots]`.
+    bool     strict_seed_mode;                 ///< If true, strictly guarantees that repeated generations with the same sampler seed produce identical results. When false, generation skips a small prefill pass and is slightly faster, but strict seed reproducibility is no longer guaranteed. Default: true.
+} cosyvoice_context_params_v4_t;
+
 #ifdef __cplusplus
 struct cosyvoice_context_params_v2_cpp : cosyvoice_context_params_t
 {
@@ -331,11 +344,19 @@ struct cosyvoice_context_params_v3_cpp : cosyvoice_context_params_v2_cpp
         };
         cosyvoice_kv_cache_type_t dit_kv_cache_type;                     ///< The data type of the KV cache in the DiT module.
     };
-    bool     dit_allow_kv_cache_fallback; ///< If true, fall back to a Flash Attention-compatible KV cache type when the requested one is unsupported.
-    uint32_t dit_kv_fixed_slots;          ///< Number of fixed (non-offloadable) DiT KV slots.
-    uint32_t dit_kv_offloadable_slots;    ///< Number of offloadable DiT KV slots.
+    bool     dit_allow_kv_cache_fallback;  ///< If true, fall back to a Flash Attention-compatible KV cache type when the requested one is unsupported.
+    uint32_t dit_kv_fixed_slots;           ///< Number of fixed (non-offloadable) DiT KV slots.
+    uint32_t dit_kv_offloadable_slots;     ///< Number of offloadable DiT KV slots.
     uint32_t dit_kv_cache_length;          ///< Maximum sequence length for the DiT KV cache. 0 to use default (n_max_seq * 10).
     uint32_t reserved_tail_padding;
+};
+
+struct cosyvoice_context_params_v4_cpp : cosyvoice_context_params_v3_cpp
+{
+    int32_t  diffusion_steps;                 ///< Number of flow-matching diffusion steps. When `<= 0`, the value comes from the `decoder.diffusion_steps` GGUF metadata (which itself defaults to 10 when absent); otherwise it is clamped to the runtime maximum.
+    uint32_t dit_kv_actual_fixed_slots;       ///< Number of physical device KV slots backing the fixed DiT KV slots. `0` means no sharing; clamped to `[1, dit_kv_fixed_slots]`.
+    uint32_t dit_kv_actual_offloadable_slots; ///< Number of physical CPU KV buffers backing the offloadable DiT KV slots. `0` means no sharing; clamped to `[1, dit_kv_offloadable_slots]`.
+    bool     strict_seed_mode;                ///< Strictly guarantees that repeated generations with the same sampler seed produce identical results. Default: true.
 };
 #endif
 
@@ -484,6 +505,14 @@ COSYVOICE_API cosyvoice_context_t cosyvoice_load_from_file_with_params_v3(
 );
 
 /**
+ * @brief Load a model context from a GGUF file using V4 context parameters with custom diffusion steps.
+ */
+COSYVOICE_API cosyvoice_context_t cosyvoice_load_from_file_with_params_v4(
+    const char*                          filename,
+    const cosyvoice_context_params_v4_t* params
+);
+
+/**
  * @brief Duplicate a loaded model context handle.
  * @note The duplicate shares the loaded model resources with the original context. It starts with the same active worker binding as the original context, and can then be rebound independently with `cosyvoice_set_worker_no()`.
  */
@@ -565,6 +594,11 @@ COSYVOICE_API bool     cosyvoice_set_generation_config(
  * @brief Retrieve the output sample rate of the loaded model.
  */
 COSYVOICE_API uint32_t cosyvoice_get_sample_rate(cosyvoice_context_t ctx);
+
+/**
+ * @brief Retrieve the effective number of flow-matching diffusion steps used by the model's DiT decoder.
+ */
+COSYVOICE_API int cosyvoice_get_diffusion_steps(cosyvoice_context_t ctx);
 
 // ----------------------------------------------------------------------------
 // Sampler API

@@ -12,6 +12,7 @@
 struct cosyvoice_model_context
 {
     virtual uint32_t get_sample_rate() = 0;
+    virtual int get_diffusion_steps() = 0;
     virtual void get_default_generation_config(cosyvoice_generation_config_t* config) = 0;
     virtual void get_generation_config(cosyvoice_generation_config_t* config) = 0;
     virtual bool set_generation_config(const cosyvoice_generation_config_t* config) = 0;
@@ -31,6 +32,7 @@ struct cosyvoice_model_context
     virtual uint32_t get_sampler_seed() = 0;
 
     virtual bool llm_prefill(ggml_type type, const void* data, uint32_t seq_len) = 0;
+    virtual bool llm_prefill_logits(ggml_type type, const void* data, uint32_t seq_len) = 0;
     virtual bool llm_decode(ggml_type type, const void* data) = 0;
     virtual void llm_prepare_probs(bool allow_stop_tokens) = 0;
 
@@ -125,6 +127,26 @@ virtual uint32_t get_sample_rate() = 0;
 ### 返回值
 
 采样率（Hz）。
+
+## cosyvoice_model_context::get_diffusion_steps
+
+### 语法
+
+```cpp
+virtual int get_diffusion_steps() = 0;
+```
+
+### 说明
+
+获取模型 DiT 解码器实际使用的流匹配扩散步数。该值在加载时由上下文参数 / GGUF 元数据解析得到，并已裁剪到运行时上限。
+
+### 参数
+
+无。
+
+### 返回值
+
+扩散步数（恒 `>= 1`）。
 
 ## cosyvoice_model_context::get_generation_config
 
@@ -316,7 +338,7 @@ virtual bool is_backend_uma() = 0;
 
 ### 备注
 
-UMA 判定在模型加载阶段完成。运行时通过对比后端 tensor 写入带宽与主机 `memcpy` 带宽来推断：若后端带宽达到主机 `memcpy` 的 70% 以上即视为 UMA。Apple Silicon（`__aarch64__`）始终报告为 UMA。
+UMA 判定在模型加载阶段完成。运行时通过对比后端 tensor 写入带宽与主机 `memcpy` 带宽来推断：若后端带宽达到主机 `memcpy` 的 70% 以上即视为 UMA。Apple Silicon（`__aarch64__`）始终报告为 UMA。该结果仅作信息展示，不会改变任何缓冲策略或其他库行为。
 
 > **注意**：UMA 检测基于带宽探测的启发式方法，结果可能因硬件、驱动版本和探测时系统负载不同而有偏差，请将其视为粗略参考而非确定性的硬件能力判断。
 
@@ -459,6 +481,32 @@ virtual bool llm_prefill(ggml_type type, const void* data, uint32_t seq_len) = 0
 ### 返回值
 
 成功返回 `true`，失败返回 `false`。
+
+## cosyvoice_model_context::llm_prefill_logits
+
+### 语法
+
+```cpp
+virtual bool llm_prefill_logits(ggml_type type, const void* data, uint32_t seq_len) = 0;
+```
+
+### 说明
+
+用一段 embedding 序列对 LLM 执行预填充，并在同一次图计算中一并计算下一个 token 的 logits。与 `llm_prefill()` 后再 `llm_decode()` 不同，注意力输出只求值预填充的最后一个位置。
+
+### 参数
+
+- `type`：输入元素类型。
+- `data`：embedding 数据。
+- `seq_len`：序列长度。
+
+### 返回值
+
+成功返回 `true`，失败返回 `false`。
+
+### 备注
+
+在采样前需先调用 `llm_prepare_probs()`。
 
 ## cosyvoice_model_context::llm_decode
 

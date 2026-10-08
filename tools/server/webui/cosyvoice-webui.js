@@ -9,6 +9,7 @@ const CFG = window.__COSYVOICE_CONFIG__ || {};
 let speakers = [];
 let statusData = {};
 let isGenerating = false;
+let stopRequested = false;
 let seedLocked = false;
 let historyEntries = [];
 const MAX_HISTORY = 20;
@@ -31,7 +32,10 @@ const ADV_PARAM_IDS = [
     'model-max-llm','model-kv-k','model-kv-v','model-buffer-policy',
     'model-threads','model-backend',
     'model-dit-kv-k','model-dit-kv-v','model-dit-fixed-slots','model-dit-offloadable-slots','model-dit-cache-length',
+    'model-dit-actual-fixed-slots','model-dit-actual-offloadable-slots',
+    'model-diffusion-steps',
     'model-llm-flash-attn','model-flow-flash-attn',
+    'model-strict-seed',
     'tts-stream','tts-chunk-tokens'
 ];
 
@@ -141,6 +145,10 @@ function initEls() {
         'model-path', 'model-backend', 'model-threads',
         'model-kv-k', 'model-kv-v', 'model-buffer-policy', 'model-max-llm',
         'model-dit-kv-k', 'model-dit-kv-v', 'model-dit-fixed-slots', 'model-dit-offloadable-slots', 'model-dit-cache-length',
+        'model-dit-actual-fixed-slots', 'model-dit-actual-offloadable-slots',
+        'model-diffusion-steps',
+        'model-llm-flash-attn', 'model-flow-flash-attn',
+        'model-strict-seed',
         'btn-reset-model-config',
         'btn-load-model', 'btn-unload-model',
         'model-load-area', 'model-loaded-area', 'model-loaded-info',
@@ -170,7 +178,7 @@ function initEls() {
         'tts-fadein', 'tts-textnorm', 'tts-split', 'tts-fastsplit',
         'tts-stream', 'tts-chunk-tokens',
         'seed-dice', 'seed-lock',
-        'btn-tts', 'btn-reset-gen-config',
+        'btn-tts', 'btn-stop-tts', 'btn-reset-gen-config',
         'player-area', 'audio-player', 'download-link',
         'tts-error',
 
@@ -345,13 +353,17 @@ function updateModelUI() {
         const mll = statusData.max_llm_len || '?';
         const llmFattn = statusData.llm_use_flash_attn !== undefined ? (statusData.llm_use_flash_attn ? 'yes' : 'no') : '?';
         const flowFattn = statusData.flow_use_flash_attn !== undefined ? (statusData.flow_use_flash_attn ? 'yes' : 'no') : '?';
+        const strictSeed = statusData.strict_seed !== undefined ? (statusData.strict_seed ? 'yes' : 'no') : '?';
+        const steps = statusData.diffusion_steps != null ? statusData.diffusion_steps : '?';
         els['model-loaded-info'].innerHTML = '<b>' + escapeHtml(arch) + '</b><br>'
             + 'KV Cache: K=' + kv_k + ', V=' + kv_v + '<br>'
             + 'Buffer Policy: ' + buf + '<br>'
             + 'Max LLM Length: ' + mll + '<br>'
             + 'LLM Flash Attn: ' + llmFattn + '<br>'
             + 'Flow Flash Attn: ' + flowFattn + '<br>'
-            + 'Sample Rate: ' + (statusData.sample_rate || '?') + ' Hz';
+            + 'Strict Seed: ' + strictSeed + '<br>'
+            + 'Sample Rate: ' + (statusData.sample_rate || '?') + ' Hz'
+            + '<br>Diffusion Steps: ' + steps;
     }
 }
 
@@ -496,6 +508,7 @@ function initModelLoad() {
 
             if (els['model-llm-flash-attn']) body.llm_use_flash_attn = els['model-llm-flash-attn'].checked;
             if (els['model-flow-flash-attn']) body.flow_use_flash_attn = els['model-flow-flash-attn'].checked;
+            if (els['model-strict-seed']) body.strict_seed_mode = els['model-strict-seed'].checked;
 
             const dkt = els['model-dit-kv-k'].value;
             const dvt = els['model-dit-kv-v'].value;
@@ -504,8 +517,14 @@ function initModelLoad() {
             body.dit_kv_fixed_slots = dfs;
             const dos = parseInt(els['model-dit-offloadable-slots'].value, 10) || 0;
             body.dit_kv_offloadable_slots = dos;
+            const dafs = parseInt(els['model-dit-actual-fixed-slots'].value, 10) || 0;
+            body.dit_kv_actual_fixed_slots = dafs;
+            const daos = parseInt(els['model-dit-actual-offloadable-slots'].value, 10) || 0;
+            body.dit_kv_actual_offloadable_slots = daos;
             const dcl = parseInt(els['model-dit-cache-length'].value, 10) || 0;
             body.dit_kv_cache_length = dcl;
+            const dsteps = parseInt(els['model-diffusion-steps'].value, 10) || 0;
+            body.diffusion_steps = dsteps;
 
             await apiFetch('/model/load', { method: 'POST', ...jsonBody(body) });
             showSuccess(els['model-success'], 'Model loaded successfully');
@@ -530,6 +549,11 @@ function initModelUnload() {
         hideError(els['model-error']);
         hideSuccess(els['model-success']);
         if (!confirm('Unload the current model? All speakers will be removed.')) return;
+
+        // If a TTS generation is in progress, stop it first
+        const stopBtn = els['btn-stop-tts'];
+        if (stopBtn && stopBtn.style.display !== 'none')
+            await stopTts();
 
         btn.disabled = true;
         btn.innerHTML = '<span class="spinner"></span>Unloading...';
@@ -1150,6 +1174,9 @@ function initTts() {
 
     btn.addEventListener('click', generateTts);
 
+    const stopBtn = els['btn-stop-tts'];
+    if (stopBtn) stopBtn.addEventListener('click', stopTts);
+
     // Mode helper text
     if (els['tts-mode']) {
         els['tts-mode'].addEventListener('change', () => {
@@ -1161,10 +1188,36 @@ function initTts() {
     }
 }
 
+// ---- Stop TTS ----
+function showStopButton(show) {
+    const btn = els['btn-stop-tts'];
+    if (btn) btn.style.display = show ? '' : 'none';
+}
+
+async function stopTts() {
+    stopRequested = true;
+    const btn = els['btn-stop-tts'];
+    if (btn) btn.disabled = true;
+    const audio = els['audio-player'];
+    if (audio) audio.pause();
+    try {
+        await fetch('/tts/stop', { method: 'POST', credentials: 'same-origin' });
+    } catch(e) { /* ignore */ }
+    if (btn) btn.disabled = false;
+}
+
 // After streaming finishes: set up download link, history, reset button.
 // The audio player already has the data via MediaSource or blob URL.
 function onStreamDone(chunks, contentType, els, voice, ext, text) {
-    if (chunks.length === 0) return;
+    const stopped = stopRequested;
+    showStopButton(false);
+    if (chunks.length === 0) {
+        if (els['btn-tts']) {
+            els['btn-tts'].disabled = false;
+            els['btn-tts'].innerHTML = ICONS.speaker + ' Generate Speech';
+        }
+        return;
+    }
     const blob = new Blob(chunks, { type: contentType });
     const url = URL.createObjectURL(blob);
     if (els['download-link']) {
@@ -1173,7 +1226,10 @@ function onStreamDone(chunks, contentType, els, voice, ext, text) {
         els['download-link'].innerHTML = ICONS.download + ' Download ' + ext.toUpperCase() + ' (' + formatFileSize(blob.size) + ')';
     }
     addHistory({ voice, text, blob, url, format: ext, mode: els['tts-mode'] ? els['tts-mode'].value : '', timestamp: new Date() });
-    showToast('Stream complete: ' + formatFileSize(blob.size), 'success');
+    if (stopped)
+        showToast('Stopped (' + formatFileSize(blob.size) + ' generated)', 'info');
+    else
+        showToast('Stream complete: ' + formatFileSize(blob.size), 'success');
     if (els['btn-tts']) {
         els['btn-tts'].disabled = false;
         els['btn-tts'].innerHTML = ICONS.speaker + ' Generate Speech';
@@ -1224,6 +1280,8 @@ async function generateTts() {
     }
 
     isGenerating = true;
+    stopRequested = false;
+    showStopButton(true);
     const btn = els['btn-tts'];
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> Generating...';
@@ -1343,10 +1401,15 @@ async function generateTts() {
             return;
         }
     } catch(e) {
-        showError(els['tts-error'], 'Synthesis failed: ' + e.message);
-        showToast('TTS generation failed', 'error');
+        if (stopRequested) {
+            showToast('Generation stopped', 'info');
+        } else {
+            showError(els['tts-error'], 'Synthesis failed: ' + e.message);
+            showToast('TTS generation failed', 'error');
+        }
     }
     isGenerating = false;
+    showStopButton(false);
     btn.disabled = false;
     btn.innerHTML = ICONS.speaker + ' Generate Speech';
 }
@@ -1781,6 +1844,16 @@ async function fetchDefaults() {
         else if (els['model-dit-offloadable-slots'] && !els['model-dit-offloadable-slots'].value)
             els['model-dit-offloadable-slots'].value = '0';
 
+        if (d.default_dit_kv_actual_fixed_slots !== undefined && els['model-dit-actual-fixed-slots'])
+            els['model-dit-actual-fixed-slots'].value = d.default_dit_kv_actual_fixed_slots;
+        else if (els['model-dit-actual-fixed-slots'] && !els['model-dit-actual-fixed-slots'].value)
+            els['model-dit-actual-fixed-slots'].value = '0';
+
+        if (d.default_dit_kv_actual_offloadable_slots !== undefined && els['model-dit-actual-offloadable-slots'])
+            els['model-dit-actual-offloadable-slots'].value = d.default_dit_kv_actual_offloadable_slots;
+        else if (els['model-dit-actual-offloadable-slots'] && !els['model-dit-actual-offloadable-slots'].value)
+            els['model-dit-actual-offloadable-slots'].value = '0';
+
         // DiT KV Cache Length: server value > 0 → use it; otherwise 10× LLM max seq
         if (d.default_dit_kv_cache_length && els['model-dit-cache-length'])
             els['model-dit-cache-length'].value = d.default_dit_kv_cache_length;
@@ -1790,9 +1863,18 @@ async function fetchDefaults() {
             els['model-dit-cache-length'].value = llm > 0 ? String(llm * 10) : '0';
         }
 
+        // Diffusion steps: 0 = use model metadata (default 10)
+        if (d.default_diffusion_steps !== undefined && els['model-diffusion-steps'])
+            els['model-diffusion-steps'].value = d.default_diffusion_steps;
+        else if (els['model-diffusion-steps'] && !els['model-diffusion-steps'].value)
+            els['model-diffusion-steps'].value = '0';
+
         // Chunk tokens (0 = model default)
         if (d.chunk_tokens !== undefined && els['tts-chunk-tokens'])
             els['tts-chunk-tokens'].value = d.chunk_tokens;
+
+        if (d.strict_seed_mode !== undefined && els['model-strict-seed'])
+            els['model-strict-seed'].checked = !!d.strict_seed_mode;
 
         if (d.temperature !== undefined) els['tts-temp'].value = r(d.temperature, 6);
         if (d.top_k !== undefined) els['tts-topk'].value = d.top_k;

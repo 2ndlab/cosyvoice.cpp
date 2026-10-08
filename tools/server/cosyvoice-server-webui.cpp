@@ -427,6 +427,7 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
         else
             json += "\"" + runtime.served_model_name + "\"";
         json += ",\"sample_rate\":" + std::to_string(runtime.sample_rate);
+        json += ",\"strict_seed\":" + std::string(runtime.strict_seed_mode ? "true" : "false");
         if (!runtime.model_slots.empty())
         {
             cosyvoice_context_params_t actual_params;
@@ -440,6 +441,7 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
             auto arch = cosyvoice_get_architecture(runtime.model_slots.front().get());
             if (arch && *arch)
                 json += ",\"model_arch\":\"" + std::string(arch) + "\"";
+            json += ",\"diffusion_steps\":" + std::to_string(cosyvoice_get_diffusion_steps(runtime.model_slots.front().get()));
         }
 #if !defined(COSYVOICE_NO_FRONTEND)
         bool fe_avail = runtime.frontend_ctx ? true : false;
@@ -723,6 +725,10 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
             return;
         }
 
+        // Track this request as in-flight so /tts/stop and /model/unload can
+        // stop it and wait for it to finish before releasing model resources.
+        auto tts_scope = std::make_shared<tts_request_scope>(runtime);
+
         const std::string text  = body.value("input", body.value("text", ""));
         if (text.empty())
         {
@@ -856,7 +862,7 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
             auto conn_checker = req.is_connection_closed;  // copy the socket-checker function
 
             res.set_chunked_content_provider(content_type,
-                [&rt, vctx, text_copy, instr_copy, speed, mode, fmt, wav_header, has_wav, log_ctx_copy, applied_seed, conn_checker]
+                [&rt, vctx, text_copy, instr_copy, speed, mode, fmt, wav_header, has_wav, log_ctx_copy, applied_seed, conn_checker, tts_scope]
                 (size_t /*offset*/, DataSink& sink) -> bool
                 {
                     auto model_ctx = get_slot_model_context(rt, 0);
@@ -971,6 +977,28 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
             res.set_content(std::move(audio_payload), response_format_to_content_type(fmt));
             log_request_done(runtime.log_level, log_ctx, request_log_status::ok, res.status, applied_seed, audio_payload.size(), "tts");
         }
+    });
+
+    // ---- POST /tts/stop - stop the active TTS generation ----
+    server.Post("/tts/stop", [&runtime](const Request&, Response& res)
+    {
+        if (runtime.model_slots.empty())
+        {
+            res.status = 409;
+            nlohmann::json err = {{"error", "No model loaded"}};
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+
+        // Blocks until the active job (if any) has stopped
+        cosyvoice_request_stop(runtime.model_slots[0].get());
+
+        log_message(runtime.log_level, server_log_level::concise, "WEBUI",
+            "TTS stop requested");
+
+        nlohmann::json ok = {{"success", true}};
+        res.status = 200;
+        res.set_content(ok.dump(), "application/json");
     });
 
     // ---- GET /frontend/model - return frontend model paths ----
@@ -1168,12 +1196,18 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
         }
 
         // Build context params with defaults
-        cosyvoice_context_params_v3_cpp context_params{ .dit_allow_kv_cache_fallback = true };
+        cosyvoice_context_params_v4_cpp context_params_v4 = {};
+        cosyvoice_context_params_v3_cpp& context_params = context_params_v4;
+        context_params.dit_allow_kv_cache_fallback = true;
         cosyvoice_init_default_context_params(&context_params);
 
         if (runtime.has_seed)
             context_params.seed = runtime.seed;
         context_params.n_workers = 1;
+        bool strict_seed_mode = runtime.strict_seed_mode;
+        if (body.contains("strict_seed_mode"))
+            strict_seed_mode = body["strict_seed_mode"].get<bool>();
+        context_params_v4.strict_seed_mode = strict_seed_mode;
 
         // Apply optional advanced config from request
         if (body.contains("llm_kv_cache_type"))
@@ -1198,10 +1232,25 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
             uint32_t v = body["dit_kv_offloadable_slots"].get<uint32_t>();
             context_params.dit_kv_offloadable_slots = v;
         }
+        if (body.contains("dit_kv_actual_fixed_slots"))
+        {
+            uint32_t v = body["dit_kv_actual_fixed_slots"].get<uint32_t>();
+            context_params_v4.dit_kv_actual_fixed_slots = v;
+        }
+        if (body.contains("dit_kv_actual_offloadable_slots"))
+        {
+            uint32_t v = body["dit_kv_actual_offloadable_slots"].get<uint32_t>();
+            context_params_v4.dit_kv_actual_offloadable_slots = v;
+        }
         if (body.contains("dit_kv_cache_length"))
         {
             uint32_t v = body["dit_kv_cache_length"].get<uint32_t>();
             context_params.dit_kv_cache_length = v;
+        }
+        if (body.contains("diffusion_steps"))
+        {
+            int v = body["diffusion_steps"].get<int>();
+            context_params_v4.diffusion_steps = v;
         }
         if (body.contains("inference_buffer_policy"))
         {
@@ -1225,7 +1274,7 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
             chunk_tokens_val = body["chunk_tokens"].get<uint32_t>();
         auto loaded_ctx = cosyvoice_load_from_file_ext(
             model_path.c_str(),
-            &context_params,
+            &context_params_v4,
             backend,
             n_threads);
 
@@ -1245,14 +1294,15 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
             cosyvoice_context_params_t p;
             cosyvoice_get_context_params(loaded_ctx, &p);
             log_message(runtime.log_level, server_log_level::concise, "WEBUI",
-                "Model loaded: %s (arch=%s, backend=%s, threads=%u, kv_cache_type=%s, buffer=%s, max_llm_len=%u)",
+                "Model loaded: %s (arch=%s, backend=%s, threads=%u, kv_cache_type=%s, buffer=%s, max_llm_len=%u, steps=%d)",
                 model_path.c_str(),
                 cosyvoice_get_architecture(loaded_ctx) ? cosyvoice_get_architecture(loaded_ctx) : "?",
                 backend_type.c_str(),
                 n_threads ? n_threads : (uint32_t)0,
                 kv_cache_type_to_string(p.llm_kv_cache_type).c_str(),
                 inference_buffer_policy_to_string(p.inference_buffer_policy),
-                p.n_max_seq);
+                p.n_max_seq,
+                cosyvoice_get_diffusion_steps(loaded_ctx));
         }
 
         // Set served model name
@@ -1281,6 +1331,10 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
             runtime.dit_kv_fixed_slots       = cp.dit_kv_fixed_slots;
             runtime.dit_kv_offloadable_slots = cp.dit_kv_offloadable_slots;
             runtime.dit_kv_cache_length      = cp.dit_kv_cache_length;
+            runtime.dit_kv_actual_fixed_slots = context_params_v4.dit_kv_actual_fixed_slots;
+            runtime.dit_kv_actual_offloadable_slots = context_params_v4.dit_kv_actual_offloadable_slots;
+            runtime.diffusion_steps          = context_params_v4.diffusion_steps;
+            runtime.strict_seed_mode         = strict_seed_mode;
         }
 
         // Apply chunk_tokens if specified
@@ -1307,7 +1361,8 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
         nlohmann::json ok = {
             {"success", true},
             {"model",    runtime.served_model_name},
-            {"sample_rate", runtime.sample_rate}
+            {"sample_rate", runtime.sample_rate},
+            {"diffusion_steps", cosyvoice_get_diffusion_steps(runtime.model_slots.front().get())}
         };
         res.status = 200;
         res.set_content(ok.dump(), "application/json");
@@ -1328,6 +1383,15 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
             res.set_content(err.dump(), "application/json");
             log_request_done(runtime.log_level, log_ctx, request_log_status::bad_request, res.status, 0, res.body.size(), "no_model");
             return;
+        }
+
+        // Stop any active TTS generation first, then wait for in-flight
+        // requests (including streaming providers) to finish before releasing
+        // model resources.
+        cosyvoice_request_stop(runtime.model_slots[0].get());
+        {
+            std::unique_lock<std::mutex> lock(runtime.tts_mutex);
+            runtime.tts_cv.wait(lock, [&runtime] { return runtime.active_tts == 0; });
         }
 
         // Order matters: TTS sessions -> voices -> model context
@@ -1367,16 +1431,20 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
         d["default_max_llm_len"]   = static_cast<uint32_t>(COSYVOICE_DEFAULT_LLM_MAX_SEQ_LEN);
         d["default_k_cache_type"]  = "q8_0";
         d["default_v_cache_type"]  = "q4_0";
-        d["default_buffer_policy"] = "balanced";
+        d["default_buffer_policy"] = "dedicated";
         d["default_backend"]       = "auto";
         d["default_n_threads"]     = 0;
+        d["strict_seed_mode"]      = runtime.strict_seed_mode;
 
         // Default DiT KV types (overridden below when model is loaded)
         d["default_dit_k_cache_type"]  = "q8_0";
         d["default_dit_v_cache_type"]  = "q4_0";
         d["default_dit_kv_fixed_slots"]       = 0;
         d["default_dit_kv_offloadable_slots"] = 0;
+        d["default_dit_kv_actual_fixed_slots"] = 0;
+        d["default_dit_kv_actual_offloadable_slots"] = 0;
         d["default_dit_kv_cache_length"]      = 0;
+        d["default_diffusion_steps"]          = 0;
 
         // Generation defaults (model-dependent or sensible fallbacks)
         if (!runtime.model_slots.empty())
@@ -1393,7 +1461,10 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
             // Use effective DiT params saved in runtime after model load
             d["default_dit_kv_fixed_slots"]       = runtime.dit_kv_fixed_slots;
             d["default_dit_kv_offloadable_slots"] = runtime.dit_kv_offloadable_slots;
+            d["default_dit_kv_actual_fixed_slots"] = runtime.dit_kv_actual_fixed_slots;
+            d["default_dit_kv_actual_offloadable_slots"] = runtime.dit_kv_actual_offloadable_slots;
             d["default_dit_kv_cache_length"]      = runtime.dit_kv_cache_length;
+            d["default_diffusion_steps"]          = runtime.diffusion_steps;
         }
         else
         {
@@ -1447,6 +1518,15 @@ int cosyvoice_server_webui_run(server_runtime& runtime)
         runtime.api_key.empty() ? "no" : "yes");
     if (runtime.sample_rate > 0)
         print_info_log(runtime.log_level, "  sample_rate        : %u\n", runtime.sample_rate);
+    if (!runtime.model_slots.empty())
+    {
+        char steps_buf[160];
+        snprintf(steps_buf, sizeof(steps_buf), "requested: %d, actual: %d%s",
+            runtime.diffusion_steps,
+            cosyvoice_get_diffusion_steps(runtime.model_slots.front().get()),
+            runtime.diffusion_steps > 0 ? " (user override)" : "");
+        print_info_log(runtime.log_level, "  diffusion_steps    : %s\n", steps_buf);
+    }
     {
         const auto speakers_str = join_strings(runtime.voice_names, ", ");
         print_info_log(runtime.log_level, "  speakers           : %s\n", speakers_str.empty() ? "-" : speakers_str.c_str());
