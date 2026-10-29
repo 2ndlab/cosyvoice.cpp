@@ -226,6 +226,9 @@ bool cosyvoice_model_3::llm_prefill(
         if (type != GGML_TYPE_F32)
         {
             emb_pos = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
+            // Written once, then reused with the graph. Keep later intermediates
+            // from overwriting these embedding indices in the allocator buffer.
+            ggml_set_output(emb_pos);
             hidden_states = ggml_get_rows(ctx0, llm_input, emb_pos);
         }
 
@@ -329,6 +332,7 @@ bool cosyvoice_model_3::llm_prefill_logits(
     if (type != GGML_TYPE_F32)
     {
         emb_pos = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens);
+        ggml_set_output(emb_pos);
         hidden_states = ggml_get_rows(ctx0, llm_input, emb_pos);
     }
 
@@ -403,6 +407,7 @@ bool cosyvoice_model_3::llm_decode(ggml_type type, const void* data)
         if (type != GGML_TYPE_F32)
         {
             emb_pos = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, 1);
+            ggml_set_output(emb_pos);
             hidden_states = ggml_get_rows(ctx0, llm_input, emb_pos);
         }
 
